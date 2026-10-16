@@ -1,7 +1,7 @@
 """In-memory Notion REST fixture; no real identity, credentials, or network."""
 
 import copy
-from datetime import timedelta
+from datetime import datetime, timedelta
 from urllib.parse import parse_qs, urlsplit
 from uuid import UUID
 
@@ -58,7 +58,16 @@ class Clock:
 class Rest:
     def __init__(self, config):
         self.config = config
+        self.source_ids = dict(config.sources)
         self.schemas = copy.deepcopy(SCHEMAS)
+        if "threads" in config.sources:
+            from orbit.thread_schema import requirements
+            for name, fields in requirements(config.sources).items():
+                self.schemas.setdefault(name, {}).update(copy.deepcopy(fields))
+        self.databases = {}
+        self.lose_next_database = False
+        self.lose_next_schema = False
+        self.normalize_dates = False
         self.pages = {}
         self.blocks = {}
         self.source = {}
@@ -94,7 +103,7 @@ class Rest:
         for name, field in properties.items():
             full[name] = {"type": self.schemas[source][name]["type"], **copy.deepcopy(field)}
         self.pages[page_id] = {"id": page_id, "properties": full,
-                               "parent": {"data_source_id": self.config.sources[source]},
+                               "parent": {"data_source_id": self.source_ids[source]},
                                "url": "https://www.notion.so/" + page_id, "last_edited_time": self.edited()}
         self.blocks[page_id] = []
         for block in copy.deepcopy(blocks):
@@ -135,8 +144,14 @@ class Rest:
             raise RemoteError("Notion", code, code >= 500 or code == 429)
         if path.startswith("data_sources/"):
             source_id = path.split("/")[1]
-            source = next(k for k, v in self.config.sources.items() if v == source_id)
+            source = next(k for k, v in self.source_ids.items() if v == source_id)
             if method == "GET":
+                return {"properties": copy.deepcopy(self.schemas[source])}
+            if method == "PATCH":
+                self.schemas[source].update(copy.deepcopy(body["properties"]))
+                if self.lose_next_schema:
+                    self.lose_next_schema = False
+                    raise RemoteError("Notion")
                 return {"properties": copy.deepcopy(self.schemas[source])}
             rows = [copy.deepcopy(p) for k, p in self.pages.items() if self.source.get(k) == source and self.match(p, body["filter"])] if "filter" in body else [copy.deepcopy(p) for k, p in self.pages.items() if self.source.get(k) == source]
             for sort in reversed(body.get("sorts", [])):
@@ -144,8 +159,21 @@ class Rest:
             offset = int(body.get("start_cursor", 0))
             size = body.get("page_size", 100)
             return {"results": rows[offset:offset + size], "has_more": offset + size < len(rows), "next_cursor": str(offset + size)}
+        if path == "databases" and method == "POST":
+            database_id, source_id = self.new_id(), self.new_id()
+            self.source_ids["threads"] = source_id
+            self.schemas["threads"] = copy.deepcopy(body["initial_data_source"]["properties"])
+            database = {"id": database_id, "data_sources": [{"id": source_id}], "description": body["description"]}
+            self.databases[database_id] = database
+            self.blocks[body["parent"]["page_id"]].append({"id": database_id, "type": "child_database", "child_database": {"title": "事项"}})
+            if self.lose_next_database:
+                self.lose_next_database = False
+                raise RemoteError("Notion")
+            return copy.deepcopy(database)
+        if path.startswith("databases/"):
+            return copy.deepcopy(self.databases[path.split("/")[1]])
         if path == "pages" and method == "POST":
-            source = next(k for k, v in self.config.sources.items() if v == body["parent"]["data_source_id"])
+            source = next(k for k, v in self.source_ids.items() if v == body["parent"]["data_source_id"])
             self.post_count += 1
             page_id = self.add(source, body["properties"], body["children"])
             if self.lose_next_create:
@@ -154,9 +182,16 @@ class Rest:
             return copy.deepcopy(self.pages[page_id])
         if path.startswith("pages/"):
             page_id = path.split("/")[1]
+            if page_id not in self.pages:
+                raise RemoteError("Notion", 404, retryable=False)
             if method == "PATCH":
                 for k, v in body["properties"].items():
                     self.pages[page_id]["properties"][k].update(copy.deepcopy(v))
+                    if self.normalize_dates and v.get("date"):
+                        raw = v["date"]["start"]
+                        self.pages[page_id]["properties"][k]["date"] = {
+                            "start": datetime.fromisoformat(raw).isoformat(timespec="milliseconds"),
+                            "end": None, "time_zone": None}
                 self.pages[page_id]["last_edited_time"] = self.edited()
             return copy.deepcopy(self.pages[page_id])
         if path.startswith("blocks/"):

@@ -8,7 +8,7 @@ from uuid import uuid4
 from .model import InvalidOutput, validate
 from .notion import SNAPSHOT_PREFIX, Conflict, UncertainWrite, compact_page, context_view, fingerprint, precise_page_date, prop_value
 from .store import digest, encode
-from .timeutil import SHANGHAI, day, parse, stamp
+from .timeutil import SHANGHAI, TIMEZONE, day, parse, stamp
 from .transport import RemoteError
 
 
@@ -33,25 +33,49 @@ def normalized(text):
 class Engine:
     def __init__(self, config, store, notion, model, clock):
         self.config, self.store, self.notion, self.model, self.clock = config, store, notion, model, clock
+        self.continuation = None
+        self._continuation_receipts = None
+        if config.continuation.enabled:
+            from .continuation import ContinuationEngine
+            self.continuation = ContinuationEngine(self)
 
     def flush(self):
         for row in self.store.pending():
             current = stamp(self.clock())
             if row["status"] == "blocked" or (row["next_at"] and row["next_at"] > current):
-                return False
+                continue
+            if not self.store.write_ready(row["id"]):
+                continue
             try:
                 operation = json.loads(row["payload"])
+                if operation.get("guards") and not row["sent"]:
+                    self.notion.assert_sources(operation["guards"])
                 if operation["kind"] == "runtime":
                     operation = {**operation, "kind": "snapshot", "prefix": "Orbit 运行状态快照\n",
                                  "previous": self.store.get("snapshot:" + operation["page_id"])}
                 for field, reference in operation.get("references", {}).items():
-                    receipt = self.store.db.execute("SELECT remote_id FROM outbox WHERE id=? AND status='done'", (reference,)).fetchone()
-                    if not receipt or not receipt[0]:
-                        raise Conflict("前置写入尚未核对，不能建立来源关联")
-                    operation["values"][field] = [receipt[0]]
+                    references = reference if isinstance(reference, list) else [reference]
+                    ids = []
+                    for ref in references:
+                        receipt = self.store.db.execute("SELECT remote_id FROM outbox WHERE id=? AND status='done'", (ref,)).fetchone()
+                        if not receipt or not receipt[0]:
+                            raise Conflict("前置写入尚未核对，不能建立来源关联")
+                        ids.append(receipt[0])
+                    operation["values"][field] = list(dict.fromkeys(operation["values"].get(field, []) + ids))
                 remote_id = self.notion.apply(row["id"], operation, bool(row["sent"]),
                                               lambda: self.store.mark_sent(row["id"]))
-                self.store.done(row["id"], remote_id, operation)
+                if operation.get("guards"):
+                    self.notion.assert_sources(operation["guards"])
+                with self.store.db:
+                    if self.continuation:
+                        self.continuation.receipt(row["id"], remote_id, operation, current)
+                    elif operation.get("thread_id"):
+                        # Disabling new generation must not discard persisted continuation receipts.
+                        if self._continuation_receipts is None:
+                            from .continuation import ContinuationEngine
+                            self._continuation_receipts = ContinuationEngine(self)
+                        self._continuation_receipts.receipt(row["id"], remote_id, operation, current)
+                    self.store.done(row["id"], remote_id, operation, current)
             except (RemoteError, Conflict, UncertainWrite) as exc:
                 # HTTP 4xx definite rejections (except timeout/conflict) did not perform a write.
                 if isinstance(exc, RemoteError) and exc.status and 400 <= exc.status < 500 and exc.status not in {408, 409}:
@@ -59,8 +83,11 @@ class Engine:
                         self.store.db.execute("UPDATE outbox SET sent=0 WHERE id=?", (row["id"],))
                 self.store.fail(row, current, exc, self.config.max_attempts,
                                 uncertain=isinstance(exc, UncertainWrite))
-                return False
-        return True
+                if operation.get("thread_id"):
+                    with self.store.db:
+                        status = self.store.db.execute("SELECT status FROM outbox WHERE id=?", (row["id"],)).fetchone()[0]
+                        self.store.db.execute("UPDATE threads SET sync_status=?,error_code=? WHERE id=?", ("blocked" if status == "blocked" else "pending", type(exc).__name__, operation["thread_id"]))
+        return not self.store.pending()
 
     def generation_ready(self, current):
         retry_at = self.store.get("next_generation_at")
@@ -87,6 +114,8 @@ class Engine:
 
     def tick(self):
         current = stamp(self.clock())
+        if self.continuation:
+            return self.continuation.tick(current)
         # Persisted writes are technical recovery and can finish even while life is paused.
         if not self.flush():
             return "writes_pending"
@@ -118,6 +147,9 @@ class Engine:
     def pending_inputs(self, context, end):
         result = []
         for page in context["events"]:
+            if self.continuation:
+                # Continuation owns all new input responses; the legacy life protocol cannot repeat them.
+                continue
             props = values(page)
             occurs = page_date(page, "发生时间")
             if props.get("状态") in {"待处理", "待发生"} and (occurs is None or occurs <= parse(end)):
@@ -125,8 +157,29 @@ class Engine:
                     result.append(page)
         return result
 
+    def verified_context(self, start, end, mode="live", check_budget=True):
+        excluded = {r[0] for r in self.store.db.execute("SELECT n.notion_page_id FROM thread_nodes n JOIN threads t ON t.id=n.thread_id WHERE t.sync_status='blocked'")}
+        context = self.notion.context(start, end, mode, check_budget=check_budget, exclude_ids=excluded) if self.continuation else self.notion.context(start, end, mode)
+        if not self.continuation:
+            return context
+        pending = {row["id"]: json.loads(row["payload"]) for row in self.store.pending()}
+        for name in ["events", "plans", "memories"]:
+            context[name] = [p for p in context[name] if not any(
+                p["blocks"] and p["blocks"][0]["text"].startswith(key + ":") for key in pending)]
+        context["events"] = [p for p in context["events"] if not page_date(p, "发生时间") or page_date(p, "发生时间") <= parse(end)]
+        used_pages = set(source_map(context))
+        for op in pending.values():
+            if op["kind"] in {"snapshot", "plan_update", "append"} and op.get("page_id") in used_pages:
+                raise Conflict("使用中的共享状态/计划/记忆仍待核对")
+        if mode == "backfill":
+            # Current supplements/undated pending inputs cannot become knowledge in a historical window.
+            context["events"] = [p for p in context["events"] if values(p).get("状态") == "已发生" and page_date(p, "发生时间") is not None]
+            context["plans"] = [p for p in context["plans"] if (page_date(p, "计划时间") or page_date(p, "到期时间")) and (page_date(p, "计划时间") or page_date(p, "到期时间")) <= parse(end)]
+            context["memories"] = [p for p in context["memories"] if not page_date(p, "发生日期") or page_date(p, "发生日期") <= parse(end)]
+        return context
+
     def generate(self, start, end, mode, backfill_id=None):
-        context = self.notion.context(start, end, mode)
+        context = self.verified_context(start, end, mode)
         if mode == "backfill":
             # Existing human/other-platform history is authoritative, even if absent from SQLite.
             if any(values(p).get("状态") == "已发生" and page_date(p, "发生时间") is not None
@@ -134,11 +187,13 @@ class Engine:
                 raise Conflict("补写窗口已有 Notion 历史记录，拒绝覆盖或重复生成")
         before = source_map(context)
         pending = self.pending_inputs(context, end) if mode == "live" else []
-        data = {"story_window": {"start": start, "end": end, "timezone": "Asia/Shanghai"},
-                "mode": mode, "generated_at": stamp(self.clock()), "context": context_view(context),
+        data = {"story_window": {"start": start, "end": end, "timezone": TIMEZONE},
+                "protocol_version": 1, "mode": mode, "generated_at": stamp(self.clock()), "context": context_view(context),
                 "pending_inputs": [p["id"] for p in pending],
                 "gaps": self.store.status()["gaps"],
                 "instruction": "pending_inputs 是本轮唯一待回应输入；其他待处理条目可能已回应或尚未到时。旧状态仅代表其原有故事时间。"}
+        if self.continuation and mode == "live":
+            data["instruction"] += " 后续链启用：本调用只推进普通日常；新邀请/配角补充/事项判断/关联计划结果由独立v2任务处理，不重复回应或另生成需要接续的新外部事件。"
         previous_error = self.store.get("last_error")
         if previous_error and previous_error.get("category") == "InvalidOutput":
             data["protocol_feedback"] = {"previous_error": previous_error.get("code"),
@@ -151,7 +206,7 @@ class Engine:
         if any(p["id"] not in referenced for p in pending) and not output["conflicts"]:
             raise InvalidOutput("待回应事件未获得 Echo 判断")
         # Re-read authority after model latency; no silent fallback or stale write proposals.
-        if source_map(self.notion.context(start, end, mode)) != before:
+        if source_map(self.verified_context(start, end, mode)) != before:
             raise Conflict("Notion 资料在生成期间变化，丢弃尚未发布的生成结果")
         run = {"id": uuid4().hex, "start": start, "end": end, "mode": mode,
                "generated_at": stamp(self.clock()), "evidence": {"sources": before, "output": digest(output)}}
@@ -209,7 +264,7 @@ class Engine:
             operations.append({"kind": "snapshot", "page_id": self.config.pages["state"], "previous": previous,
                                "text": "此前快照只代表原时间；未知项留空。\n" + encode({
                 **provenance, **state, "story_time": events[state["source_event"]]["time"],
-                "source": event_links[state["source_event"]], "timezone": "Asia/Shanghai"})})
+                "source": event_links[state["source_event"]], "timezone": TIMEZONE})})
         event_keys = {event["id"]: f"orbit:{run['id']}:{i}" for i, event in enumerate(output["events"])}
         for plan in output["plans"]:
             # Historical intentions stay in the historical event body, not today's outstanding tasks.
@@ -261,6 +316,7 @@ class Engine:
             "historical_intentions": output["plans"] if run["mode"] == "backfill" else [],
             "historical_plan_decisions": output["plan_updates"] if run["mode"] == "backfill" else [],
             "paused": self.store.get("paused", False),
+            "continuation": self.store.continuation_status() if self.continuation else None,
             "next_wake_not_before": stamp(parse(run["end"]) + timedelta(seconds=self.config.interval_seconds)) if run["mode"] == "live" else None,
             "publication": "前序写回已逐项读回核对；本条核对后本轮写回完成"})))
         return operations

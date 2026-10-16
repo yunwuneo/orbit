@@ -31,6 +31,16 @@ class ConfigError(ValueError):
 
 
 @dataclass(frozen=True)
+class Continuation:
+    enabled: bool = False
+    input_poll_seconds: int = 60
+    default_check_seconds: int = 600
+    min_check_seconds: int = 60
+    no_reply_review_after: int = 3
+    max_tasks_per_tick: int = 8
+
+
+@dataclass(frozen=True)
 class Config:
     db_path: str = "var/orbit.sqlite3"
     interval_seconds: int = 600
@@ -49,6 +59,7 @@ class Config:
     notion_token: str = field(default="", repr=False)
     pages: dict = field(default_factory=lambda: dict(PAGES))
     sources: dict = field(default_factory=lambda: dict(SOURCES))
+    continuation: Continuation = field(default_factory=Continuation)
 
     def require_connections(self, model=True):
         required = [self.notion_token] + ([self.model_base_url, self.model_name, self.model_key] if model else [])
@@ -107,7 +118,7 @@ def load_config(path="orbit.toml", env_file=None):
                            required=env_file is not None)
     environment = {**file_env, **os.environ}
     raw = tomllib.loads(p.read_text()) if p.exists() else {}
-    allowed = {"runtime", "model", "pages", "sources"}
+    allowed = {"runtime", "model", "pages", "sources", "continuation"}
     if raw.keys() - allowed:
         raise ConfigError("未知配置段")
     runtime = raw.get("runtime", {})
@@ -117,7 +128,7 @@ def load_config(path="orbit.toml", env_file=None):
         raise ConfigError("未知配置项；凭据请通过环境变量或 .env 提供")
     pages, sources = dict(PAGES), dict(SOURCES)
     for target, name in [(pages, "pages"), (sources, "sources")]:
-        if raw.get(name, {}).keys() - target.keys():
+        if raw.get(name, {}).keys() - (target.keys() | ({"threads"} if name == "sources" else set())):
             raise ConfigError("未知 Notion 资源用途")
         target.update(raw.get(name, {}))
         try:
@@ -125,7 +136,19 @@ def load_config(path="orbit.toml", env_file=None):
                 UUID(value)
         except (ValueError, TypeError, AttributeError) as exc:
             raise ConfigError("Notion 资源 ID 必须是 UUID") from exc
-    config = Config(**runtime, pages=pages, sources=sources,
+    continuation_raw = raw.get("continuation", {})
+    if continuation_raw.keys() - Continuation.__dataclass_fields__.keys():
+        raise ConfigError("未知后续链配置项")
+    continuation = Continuation(**continuation_raw)
+    if type(continuation.enabled) is not bool:
+        raise ConfigError("continuation.enabled 必须是布尔值")
+    for name in Continuation.__dataclass_fields__.keys() - {"enabled"}:
+        value = getattr(continuation, name)
+        if type(value) is not int or value <= 0:
+            raise ConfigError("后续链间隔和计数必须是正整数")
+    if continuation.default_check_seconds < continuation.min_check_seconds:
+        raise ConfigError("默认检查间隔不能小于最小间隔")
+    config = Config(**runtime, pages=pages, sources=sources, continuation=continuation,
                     model_base_url=environment.get("ORBIT_MODEL_BASE_URL", raw.get("model", {}).get("base_url", "")),
                     model_name=environment.get("ORBIT_MODEL_NAME", raw.get("model", {}).get("name", "")),
                     model_key=environment.get("ORBIT_MODEL_API_KEY", ""),

@@ -1,7 +1,8 @@
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
-SHANGHAI = ZoneInfo("Asia/Shanghai")
+TIMEZONE = "Asia/Shanghai"
+SHANGHAI = ZoneInfo(TIMEZONE)
 
 
 def now():

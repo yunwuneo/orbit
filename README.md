@@ -4,6 +4,8 @@
 
 已有初版实现，55 项本地测试及真实模型、隔离 Notion 写回、单轮常驻进程联调已通过。**正式持续运行、云服务器部署和长期稳定性尚未验收**。测试范围、发现的兼容问题与修复见 [联调报告](docs/live-acceptance-2026-10-16.md)，需求覆盖见 [实现与验收记录](docs/implementation.md)。
 
+事件后续链已完成本地实现，默认关闭；当前 98 项本地测试通过。虚构隔离区的真实模型与 Notion 链路已完成一次有限验收，正式启用、持续运行及部署尚未验收。证据见 [后续链实现记录](docs/event-continuation-implementation.md) 和 [真实验收报告](docs/event-continuation-live-acceptance-2026-10-16.md)，设计要求见 [实现规格](docs/event-continuation-spec.md)。
+
 ## 配置与启动
 
 复制 `orbit.toml.example` 为 `orbit.toml`，填写模型 Base URL 和 Model Name。Base URL 包含供应商要求的 `/v1` 前缀，程序追加 `/chat/completions`。凭据从环境变量读取：
@@ -25,7 +27,7 @@ python3 -m orbit once     # 在当前时刻判断一次；每次执行都作为�
 python3 -m orbit run      # 常驻、定时唤醒；Ctrl-C / SIGTERM 正常停止
 ```
 
-首次启动只定位当前时刻，不从历史日记自动补写。默认每 10 分钟唤醒，实时窗口 10 分钟；这是可调整的实现默认值。宿主机设为日本时区也不改变故事日期。
+首次启动只定位当前时刻，不从历史日记自动补写。默认每 10 分钟唤醒，实时窗口 10 分钟；这是可调整的实现默认值。故事与部署进程统一使用 `Asia/Shanghai`，不随服务器地理位置改变。
 
 ## 管理命令
 
@@ -51,10 +53,36 @@ python3 -m orbit confirm-absent WRITE_ID --verified-in-notion
 python3 -m orbit sync
 ```
 
+## 事件后续链
+
+先保持 `[continuation] enabled = false`，运行只读预检。以下初始化命令会在配置的 Echo 中心创建“事项”库，并向事件、计划库添加缺少的字段；只进行加法迁移，类型或关系目标不兼容会报错。
+
+```sh
+python3 -m orbit threads-schema --plan
+python3 -m orbit threads-schema --apply
+```
+
+将初始化输出的公开 UUID 写入 `[sources] threads = "..."`，再设置 `[continuation] enabled = true`。默认参数见配置样例。启动只检查结构，不自动建库；初始化中断后重跑同一命令会先查步骤回执及远端标识，不修改 TOML。
+
+```sh
+python3 -m orbit threads
+python3 -m orbit thread THREAD_ID
+python3 -m orbit thread-recheck THREAD_ID
+python3 -m orbit thread-adopt EVENT_PAGE_ID
+```
+
+前两项只读本地摘要；复评命令幂等排队，暂停时不执行角色判断。`thread-adopt` 显式接纳旧未决事件，先检查来源、已有消费和主观决定；不能恢复旧决定时报告冲突，不绕过防重。首次启用会登记现有输入基线，不自动重新回应旧邀请。
+
+新输入可以明确关联“所属事项”或“前序事件”；标题相同不会自动合并。Orbit 在上游节点、事项页和关系写回核对后才触发 Echo 判断。无回复只增加技术检查计数，到阈值交给 Echo 复评；未来计划到期也只允许检查，完成须有独立执行结果回执。人工修改事项受管理字段或正文会阻塞旧任务并保留人工版本。
+
+输入轮询与日常生成使用独立游标；默认 60 秒轮询不会把 600 秒生活节奏提高十倍。停机恢复合并过期检查，在当前时刻判断，不重放停机剧情。补写与当前事项隔离。
+
+隔离真实联调入口是 `python3 -m tests.live_continuation --help`。本轮已执行并归档隔离测试树；完整步骤、副作用、核对结果和未覆盖项见 [真实验收报告](docs/event-continuation-live-acceptance-2026-10-16.md)。旧版联调报告不代表后续链的实测证据。
+
 ## 验证
 
 ```sh
-PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -v
+PYTHONDONTWRITEBYTECODE=1 TZ=Asia/Shanghai python3 -m unittest discover -v
 ```
 
 测试使用内存中的 Notion REST 实现和可控 Echo 输出，不联网、不创建真实剧情或记忆。无需下载依赖、创建虚拟环境或工作树。运行数据库只保留待写内容和少量恢复索引，成功读回后清除任务正文；测试临时目录自动清理。

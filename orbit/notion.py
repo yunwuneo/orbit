@@ -43,6 +43,20 @@ def prop_value(prop):
     return value
 
 
+def property_equal(actual, expected):
+    """Notion normalizes dates and adds null metadata; compare their instants."""
+    if isinstance(actual, dict) and isinstance(expected, dict) and "start" in actual and "start" in expected:
+        def normalized(value):
+            if value is None:
+                return None
+            return parse(value if "T" in value else value + "T00:00:00+08:00")
+        try:
+            return all(normalized(actual.get(k)) == normalized(expected.get(k)) for k in ["start", "end"])
+        except (ValueError, TypeError, AttributeError):
+            return False
+    return actual == expected
+
+
 def fingerprint(page):
     return digest({"properties": page.get("properties"), "blocks": page.get("blocks", []),
                    "edited": page.get("last_edited_time"), "archived": page.get("archived", False)})
@@ -168,8 +182,8 @@ class Notion:
         iterator = self.listing(f"data_sources/{self.config.sources[source]}/query", body)
         return list(islice(iterator, limit)) if limit else list(iterator)
 
-    def context(self, start, end, mode="live"):
-        for name in self.config.sources:
+    def context(self, start, end, mode="live", check_budget=True, exclude_ids=()):
+        for name in ["memories", "events", "plans"] + (["threads"] if self.config.continuation.enabled else []):
             self.schema(name)
         pages = {name: self.page(page_id) for name, page_id in self.config.pages.items()
                  if name != "operations"}
@@ -193,7 +207,7 @@ class Notion:
                 {"property": "发生时间", "date": {"on_or_before": date_index(end)}},
             ]})
             events = list({p["id"]: p for p in events + window_history}.values())
-        events = [self.page(x["id"]) for x in events]
+        events = [self.page(x["id"]) for x in events if x["id"] not in exclude_ids]
         plans = self.rows("plans", {"and": [
             {"property": "状态", "select": {"does_not_equal": "已完成"}},
             {"property": "状态", "select": {"does_not_equal": "已取消"}},
@@ -205,9 +219,39 @@ class Notion:
         diaries = [self.page(x["id"]) for x in children[-min(3, self.config.context_days):]]
         result = {"pages": pages, "memories": memories, "events": events,
                   "plans": plans, "diaries": diaries, "mode": mode}
-        if len(encode(context_view(result))) > self.config.max_context_chars:
+        if check_budget and len(encode(context_view(result))) > self.config.max_context_chars:
             raise Conflict("资料超过上下文上限；请调整配置或整理 Notion，未使用旧副本")
         return result
+
+    def thread_context(self, thread, nodes, start, end, context=None):
+        context = context if context is not None else self.context(start, end)
+        pages = {p["id"]: p for p in context["events"]}
+        # Query the relation as well as the local index: imports/manual additions must be visible.
+        related = self.rows("events", {"property": "所属事项", "relation": {"contains": thread["notion_page_id"]}}) if thread["notion_page_id"] else []
+        for node in nodes:
+            if not node["verified_at"] or not node["notion_page_id"]:
+                raise Conflict("事项存在未核对节点")
+            page = self.page(node["notion_page_id"])
+            latest_version = not any(n["notion_page_id"] == node["notion_page_id"] and n["revision"] > node["revision"] for n in nodes)
+            if latest_version and node.get("authority_version") and fingerprint(page) != node["authority_version"]:
+                raise Conflict("事项来源已变化；等待输入轮询核对")
+            pages[page["id"]] = page
+        for row in related:
+            if row["id"] not in {n["notion_page_id"] for n in nodes}:
+                page = self.page(row["id"])
+                when = precise_page_date(page, "发生时间")
+                if (when and when > parse(end)) or prop_value(page["properties"]["状态"]) == "已取消":
+                    continue
+                # New unindexed supplementation must pass the input poll before influencing a decision.
+                raise Conflict("事项出现尚未接纳的新关联来源，等待轮询")
+        context["events"] = list(pages.values())
+        # Explicitly retrieve linked completed/cancelled plans too, beyond the normal open-plan query.
+        return context
+
+    def assert_sources(self, versions):
+        for page_id, version in versions.items():
+            if fingerprint(self.page(page_id)) != version:
+                raise Conflict("使用的来源已变化；未发布旧输出")
 
     def properties(self, source, values):
         schema = self.schemas.get(source) or self.schema(source)
@@ -245,6 +289,40 @@ class Notion:
     def apply(self, key, operation, sent, mark_sent):
         marker = key + ":" + digest(operation)[:16]
         kind = operation["kind"]
+        if kind == "projection":
+            page = self.page(operation["page_id"])
+            desired = self.properties("threads", operation["values"])
+            if operation["values"].get("下次检查") is None:
+                desired["下次检查"] = {"date": None}
+            # Protect managed properties as well as human notes outside the managed block.
+            for name, old in operation["previous_values"].items():
+                actual = prop_value(page["properties"][name])
+                wanted = prop_value({"type": next(iter(desired[name])), **desired[name]})
+                if not property_equal(actual, old) and not property_equal(actual, wanted):
+                    raise Conflict("事项进度被人工修改；保留人工版本")
+            if any(not property_equal(prop_value(page["properties"][name]), prop_value({"type": next(iter(value)), **value})) for name, value in desired.items()):
+                self.request("PATCH", f"pages/{page['id']}", {"properties": desired})
+            snapshot = {"kind": "snapshot", "page_id": page["id"], "prefix": "Orbit 事项进度\n",
+                        "previous": operation["previous"], "text": operation["text"]}
+            # A new block's uncertain creation is reconciled using its stable marker.
+            self.apply(key + ":body", snapshot, sent, mark_sent)
+            check = self.page(page["id"])
+            if any(not property_equal(prop_value(check["properties"][name]), prop_value({"type": next(iter(value)), **value})) for name, value in desired.items()):
+                raise Conflict("事项投影写后核对失败")
+            return page["id"]
+        if kind == "properties":
+            page = self.page(operation["page_id"])
+            desired = operation["values"]
+            if all(prop_value(page["properties"][name]) == value for name, value in desired.items()):
+                return page["id"]
+            if fingerprint(page) != operation["expected"]:
+                raise Conflict("关系目标页面已变化；未覆盖人工内容")
+            mark_sent()
+            self.request("PATCH", "pages/" + page["id"], {"properties": self.properties(operation["source"], desired)})
+            check = self.page(page["id"])
+            if not all(prop_value(check["properties"][name]) == value for name, value in desired.items()):
+                raise Conflict("关系写后核对失败")
+            return page["id"]
         if kind == "snapshot":
             prefix = operation.get("prefix", SNAPSHOT_PREFIX)
             blocks = self.blocks(operation["page_id"])

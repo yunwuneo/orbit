@@ -25,7 +25,7 @@ from orbit.engine import Engine, source_map, values
 from orbit.model import Model, validate
 from orbit.notion import SNAPSHOT_PREFIX, Notion, compact_page, context_view, fingerprint, paragraph, rich
 from orbit.store import Store, digest, encode
-from orbit.timeutil import SHANGHAI, day, now, parse, stamp
+from orbit.timeutil import SHANGHAI, TIMEZONE, day, now, parse, stamp
 from orbit.transport import RemoteError
 
 
@@ -159,7 +159,7 @@ def production_model(config, state):
     notion = LiveNotion(config)
     context = notion.context(stamp(now()), stamp(now()))
     end = now()
-    data = {"story_window": {"start": stamp(end - timedelta(seconds=120)), "end": stamp(end), "timezone": "Asia/Shanghai"},
+    data = {"story_window": {"start": stamp(end - timedelta(seconds=120)), "end": stamp(end), "timezone": TIMEZONE},
             "generated_at": stamp(end), "mode": "live", "context": context_view(context),
             "pending_inputs": [], "gaps": [],
             "instruction": "只读联调：根据资料在当前窗口形成判断。此结果不发布到正式生活历史。"}
@@ -402,7 +402,7 @@ def checks(config, state):
         if "point_window_model" not in state.get("results", {}):
             context = notion.context(stamp(now()), stamp(now()))
             point = stamp(now())
-            data = {"story_window": {"start": point, "end": point, "timezone": "Asia/Shanghai"},
+            data = {"story_window": {"start": point, "end": point, "timezone": TIMEZONE},
                     "mode": "live", "context": context_view(context), "pending_inputs": [],
                     "gaps": store.status()["gaps"], "instruction": "本轮仅为启动瞬时协议验证，不发布内容；待处理输入已经回应。"}
             output = validate(model.decide(data), point, point, context)
@@ -429,7 +429,7 @@ def daemon(config, state):
                       "\n[model]\nbase_url=" + json.dumps(cfg.model_base_url) + "\nname=" + json.dumps(cfg.model_name) + "\n" +
                       "[pages]\n" + "\n".join(k + "=" + json.dumps(v) for k, v in cfg.pages.items()) +
                       "\n[sources]\n" + "\n".join(k + "=" + json.dumps(v) for k, v in cfg.sources.items()) + "\n")
-    env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "TZ": "Asia/Tokyo",
+    env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "TZ": TIMEZONE,
            "ORBIT_MODEL_API_KEY": cfg.model_key, "ORBIT_NOTION_TOKEN": cfg.notion_token,
            "ORBIT_MODEL_BASE_URL": cfg.model_base_url, "ORBIT_MODEL_NAME": cfg.model_name}
     process = subprocess.Popen([sys.executable, "-u", "-m", "orbit", "--config", str(public), "run"],
@@ -452,7 +452,7 @@ def daemon(config, state):
         process.send_signal(signal.SIGTERM)
         code = process.wait(timeout=15)
         must(code == 0, "daemon_did_not_stop_cleanly")
-        record(state, "real_daemon", passed=True, host_timezone="Asia/Tokyo", completed_rounds=1,
+        record(state, "real_daemon", passed=True, host_timezone=TIMEZONE, completed_rounds=1,
                sigterm_exit_code=code, process_left_running=False)
     finally:
         if process.poll() is None:
@@ -495,7 +495,7 @@ def report(config, state):
         ("backfill_snapshot_audit", "补写后的当前快照独立读回审计"),
         ("real_model_diary", "真实模型日记、来源筛选和重复执行防重"),
         ("point_window_model", "真实模型启动瞬时窗口时间协议"),
-        ("real_daemon", "Asia/Tokyo 真实常驻进程的一轮推进与 SIGTERM"),
+        ("real_daemon", "Asia/Shanghai 真实常驻进程的一轮推进与 SIGTERM"),
         ("test_area_archived", "临时 Notion 测试区归档核对"),
     ]
     for key, _ in checks:
@@ -536,7 +536,7 @@ def report(config, state):
               "2. 本工作区实际将 Notion 日期属性保存到分钟，导致包含秒和小数秒的成功写入被误判为日期冲突。现将属性用作分钟索引，完整时间留在正文；计划判断与补写冲突检查使用完整时间，并尊重人工日期更正。原待写记录已核对恢复，没有重建。", "",
               "3. 计划探针出现连接故障后，完整查询隔离库与稳定标识，确认未创建才重试。第二段补写也遇到远端故障；未移动失败段游标，随后从原任务完成。错误概要现区分服务、HTTP 状态及安全的错误类别，不输出响应正文或凭据。", "",
               "## 本地证据与清理", "",
-              "本地测试命令：`PYTHONDONTWRITEBYTECODE=1 TZ=Asia/Tokyo python3 -m unittest discover -q`，55/55 通过。新增用例覆盖分钟索引下的完整时间、人工日期更正、同一分钟内未来计划的完成保护、补写窗口内历史查重和脱敏连接诊断。", "",
+              "本地测试命令：`PYTHONDONTWRITEBYTECODE=1 TZ=Asia/Shanghai python3 -m unittest discover -q`，55/55 通过。新增用例覆盖分钟索引下的完整时间、人工日期更正、同一分钟内未来计划的完成保护、补写窗口内历史查重和脱敏连接诊断。", "",
               "独立实测入口：`python3 -m tests.live_acceptance STAGE`。该入口会真实调用服务并创建临时 Notion 数据；重新执行正式资料的模型阶段须取得相应授权。", "",
               "测试数据库按模式统计：`" + encode(summary) + "`；最终待写队列为 0。正式运行数据库记录数：`" + encode(production_counts) + "`。", "",
               "`.env` 权限已设为 0600；任务代码、报告、临时配置和测试数据库未发现真实凭据副本。测试使用标准库，未安装依赖或建立新环境。", "",

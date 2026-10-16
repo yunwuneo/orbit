@@ -10,6 +10,7 @@ Group=orbit
 WorkingDirectory=/opt/orbit
 EnvironmentFile=/etc/orbit/orbit.env
 Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=TZ=Asia/Shanghai
 ExecStart=/usr/bin/python3 -m orbit --config /etc/orbit/orbit.toml run
 Restart=on-failure
 RestartSec=30

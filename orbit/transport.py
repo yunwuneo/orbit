@@ -3,6 +3,7 @@
 import json
 import socket
 import time
+from http.client import HTTPException
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
@@ -40,7 +41,7 @@ class Transport:
                 retryable = exc.code in {408, 409, 429} or exc.code >= 500
                 error = RemoteError(service, exc.code, retryable)
                 exc.close()
-            except (URLError, TimeoutError, socket.timeout, ConnectionError, OSError, ValueError) as exc:
+            except (URLError, TimeoutError, socket.timeout, ConnectionError, OSError, ValueError, HTTPException) as exc:
                 cause = exc.reason if isinstance(exc, URLError) else exc
                 error = RemoteError(service, reason=type(cause).__name__)
             if not error.retryable or attempt == attempts - 1:

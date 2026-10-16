@@ -1,4 +1,5 @@
 # 公开配置；复制为 orbit.toml。凭据通过环境变量或同目录 .env 提供，不写在这里。
+# 故事时区固定 Asia/Shanghai；部署进程同样设置 TZ=Asia/Shanghai。持久化使用 UTC。
 [runtime]
 db_path = "var/orbit.sqlite3"
 interval_seconds = 600
@@ -17,8 +18,18 @@ retention_days = 30
 base_url = ""
 name = ""
 
+# 默认关闭；先显式初始化和核对 schema，再填写 sources.threads 并启用。
+[continuation]
+enabled = false
+input_poll_seconds = 60
+default_check_seconds = 600
+min_check_seconds = 60
+no_reply_review_after = 3
+max_tasks_per_tick = 8
+
 # pages/sources 的默认 ID 已对应现有 Echo Notion 结构，可按用途覆盖。
 # [pages]
 # rules = "3fb22e543e58810e8a35f8422cb29aa1"
 # [sources]
 # events = "676f2a53-0349-4afe-b173-7a7cc096430c"
+# threads = "初始化输出的公开数据源 UUID"

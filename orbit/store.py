@@ -55,6 +55,8 @@ class Store:
                 cursor TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending');
             CREATE TABLE IF NOT EXISTS diaries(day TEXT PRIMARY KEY, signature TEXT NOT NULL);
         """)
+        from .threads import migrate
+        migrate(self.db)
 
     def close(self):
         self.db.close()
@@ -99,6 +101,22 @@ class Store:
                 self.gap(previous, current, reason)
             self.put("cursor", current)
             self.put("session_started", current)
+            self.put("next_input_poll", current)
+            self.db.execute("UPDATE thread_tasks SET status='pending' WHERE status='running' AND output_run_id IS NULL")
+            # Collapse overdue checks to one current wake per valid cause; never replay elapsed windows.
+            self.db.execute("UPDATE threads SET missed_checks=missed_checks+(SELECT count(*) FROM thread_tasks t WHERE t.thread_id=threads.id AND t.status='pending' AND t.due_at<?) WHERE root_node_id IS NOT NULL", (current,))
+            from .threads import Threads
+            repo = Threads(self)
+            for thread in repo.list():
+                overdue = self.db.execute("SELECT error_code FROM thread_tasks WHERE thread_id=? AND status='pending' AND due_at<? ORDER BY error_code IS NULL,id LIMIT 1", (thread["id"], current)).fetchone()
+                if overdue and thread["status"] != "closed":
+                    self.db.execute("UPDATE thread_tasks SET status='superseded',error_code=coalesce(error_code,'recovery_coalesced') WHERE thread_id=? AND status='pending' AND due_at<?", (thread["id"], current))
+                    cycle = thread["review_cycle"] + 1
+                    self.db.execute("UPDATE threads SET review_cycle=?,next_check_at=?,projection_dirty=1 WHERE id=?", (cycle, current, thread["id"]))
+                    task_id = repo.task(thread["id"], "echo_decision", f"recovery:{thread['revision']}:{cycle}", thread["revision"], current, current,
+                                        [("node", n["id"]) for n in repo.nodes(thread["id"])])
+                    if overdue["error_code"]:
+                        self.db.execute("UPDATE thread_tasks SET error_code=? WHERE id=?", (overdue["error_code"], task_id))
 
     def pause(self, current):
         with self.db:
@@ -126,6 +144,22 @@ class Store:
             key = f"orbit:{run['id']}:{seq}"
             self.db.execute("INSERT INTO outbox(id,run_id,seq,payload) VALUES (?,?,?,?)",
                             (key, run["id"], seq, encode(operation)))
+            dependencies = set(operation.get("depends_on", []))
+            for reference in operation.get("references", {}).values():
+                dependencies.update(reference if isinstance(reference, list) else [reference])
+            if seq and run["mode"] != "continuation":
+                dependencies.add(f"orbit:{run['id']}:{seq - 1}")
+            resources = set(operation.get("resources", []))
+            if operation["kind"] in {"snapshot", "runtime", "append", "plan_update", "properties", "projection"}:
+                resources.add("page:" + operation["page_id"])
+            for resource in resources:
+                # Resource order spans runs, while unrelated threads may publish independently.
+                prior = self.db.execute("SELECT r.write_id FROM write_resources r JOIN outbox o ON o.id=r.write_id WHERE resource=? AND o.status!='done' AND r.write_id!=? ORDER BY o.rowid DESC LIMIT 1", (resource, key)).fetchone()
+                if prior:
+                    dependencies.add(prior[0])
+                self.db.execute("INSERT INTO write_resources VALUES (?,?)", (key, resource))
+            for dependency in dependencies:
+                self.db.execute("INSERT INTO write_dependencies VALUES (?,?)", (key, dependency))
         if run["mode"] == "live":
             for page_id, version in consumed:
                 self.db.execute("INSERT INTO consumed VALUES (?,?) ON CONFLICT(id) DO UPDATE SET version=excluded.version",
@@ -136,15 +170,30 @@ class Store:
         with self.db:
             self.db.execute("UPDATE outbox SET sent=1 WHERE id=?", (key,))
 
-    def done(self, key, remote_id, operation=None):
+    def write_ready(self, key):
+        return not self.db.execute("SELECT 1 FROM write_dependencies d LEFT JOIN outbox o ON o.id=d.dependency_id WHERE d.write_id=? AND (o.status IS NULL OR o.status!='done')", (key,)).fetchone()
+
+    def done(self, key, remote_id, operation=None, current=None):
         with self.db:
             if operation and operation["kind"] == "snapshot":
                 marker = key + ":" + digest(operation)[:16]
                 body = operation.get("prefix", "Orbit 当前生活快照\n") + marker + "\n" + operation["text"]
                 self.put("snapshot:" + operation["page_id"], {"id": remote_id, "hash": digest(body)})
             # Drop full generated payload after acknowledgement; keep tiny dedup evidence.
-            self.db.execute("UPDATE outbox SET status='done',payload=NULL,error=NULL,remote_id=? WHERE id=?",
-                            (remote_id, key))
+            self.db.execute("UPDATE outbox SET status='done',payload=NULL,error=NULL,remote_id=?,verified_at=?,receipt_hash=? WHERE id=?",
+                            (remote_id, current, digest(operation) if operation else None, key))
+            self.db.execute("UPDATE thread_nodes SET notion_page_id=?,verified_at=? WHERE write_id=?", (remote_id, current, key))
+            if operation and operation.get("thread_create"):
+                self.db.execute("UPDATE threads SET notion_page_id=? WHERE id=?", (remote_id, operation["thread_create"]))
+            if operation and operation.get("thread_projection"):
+                thread = self.db.execute("SELECT * FROM threads WHERE id=?", (operation["thread_projection"],)).fetchone()
+                matches = all(thread[k] == v for k, v in operation.get("projection_state", {
+                    "revision": operation["revision"], "next_check_at": operation["values"].get("下次检查")}).items())
+                self.db.execute("UPDATE threads SET published_revision=max(published_revision,?),sync_status=?,error_code=NULL,projection_dirty=? WHERE id=?",
+                                (operation["revision"], "verified" if matches else "pending", 0 if matches else 1, operation["thread_projection"]))
+            if operation and operation.get("thread_plan"):
+                self.db.execute("INSERT OR IGNORE INTO thread_plan_links VALUES (?,?,?)",
+                                (operation["thread_plan"], remote_id, operation["decision_node_id"]))
 
     def operational(self, page_id, current, details):
         run = {"id": uuid4().hex, "start": current, "end": current, "generated_at": current,
@@ -194,6 +243,8 @@ class Store:
                           | {"operation": payload["kind"], "page_id": payload.get("page_id"),
                              "source": payload.get("source"), "marker_prefix": row["id"]})
         return {
+            "schema_version": self.db.execute("PRAGMA user_version").fetchone()[0],
+            "continuation": self.continuation_status(),
             "paused": self.get("paused", False), "cursor": self.get("cursor"),
             "last_error": self.get("last_error"), "next_generation_at": self.get("next_generation_at"),
             "generation_blocked": self.get("generation_blocked", False),
@@ -205,8 +256,26 @@ class Store:
     def prune(self, current, retention_days):
         cutoff = stamp(parse(current) - timedelta(days=retention_days))
         with self.db:
-            self.db.execute("DELETE FROM outbox WHERE status='done' AND run_id IN (SELECT id FROM runs WHERE generated_at<?)",
+            # Empty world probes are technical checks, not archived business matters.
+            empty = "SELECT id FROM threads WHERE root_node_id IS NULL AND status='closed' AND created_at<?"
+            self.db.execute("DELETE FROM task_dependencies WHERE task_id IN (SELECT id FROM thread_tasks WHERE thread_id IN (" + empty + "))", (cutoff,))
+            self.db.execute("DELETE FROM thread_tasks WHERE thread_id IN (" + empty + ")", (cutoff,))
+            self.db.execute("DELETE FROM threads WHERE id IN (" + empty + ")", (cutoff,))
+            self.db.execute("DELETE FROM write_dependencies WHERE write_id IN (SELECT id FROM outbox WHERE status='done') AND dependency_id IN (SELECT id FROM outbox WHERE status='done')")
+            self.db.execute("DELETE FROM write_resources WHERE write_id IN (SELECT id FROM outbox WHERE status='done')")
+            self.db.execute("DELETE FROM outbox WHERE status='done' AND id NOT IN (SELECT dependency_id FROM write_dependencies UNION SELECT write_id FROM write_dependencies UNION SELECT write_id FROM thread_nodes WHERE write_id IS NOT NULL UNION SELECT dependency_id FROM task_dependencies WHERE dependency_type='write') AND run_id IN (SELECT id FROM runs WHERE generated_at<?)",
                             (cutoff,))
             # Keep coverage and source fingerprints; remove large per-source hash maps after retention.
-            self.db.execute("UPDATE runs SET evidence='{}' WHERE generated_at<?", (cutoff,))
+            self.db.execute("UPDATE runs SET evidence='{}' WHERE generated_at<? AND id NOT IN (SELECT output_run_id FROM thread_tasks WHERE output_run_id IS NOT NULL)", (cutoff,))
             self.db.execute("PRAGMA incremental_vacuum")
+
+    def continuation_status(self):
+        from .threads import Threads
+        threads = Threads(self)
+        tasks = [dict(x) for x in self.db.execute("SELECT * FROM thread_tasks")]
+        current = self.get("last_continuation_check") or self.get("cursor")
+        ready = sum(threads.ready(task, current) for task in tasks) if current else 0
+        return {"threads": {r[0]: r[1] for r in self.db.execute("SELECT status,count(*) FROM threads WHERE root_node_id IS NOT NULL GROUP BY status")},
+                "runnable_tasks": ready, "waiting_tasks": sum(t["status"] == "pending" for t in tasks) - ready,
+                "earliest_check": self.db.execute("SELECT min(next_check_at) FROM threads WHERE status!='closed'").fetchone()[0],
+                "tasks": {status: sum(t["status"] == status for t in tasks) for status in ["pending", "blocked", "superseded", "done"]}}

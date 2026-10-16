@@ -12,7 +12,7 @@ from datetime import timedelta
 from .config import ConfigError, load_config
 from .engine import Engine
 from .model import InvalidOutput, Model
-from .notion import Conflict, Notion
+from .notion import Conflict, Notion, UncertainWrite
 from .store import Busy, Store
 from .timeutil import day, now, parse, stamp
 from .transport import RemoteError
@@ -23,7 +23,7 @@ def parser():
     root.add_argument("--config", default="orbit.toml")
     root.add_argument("--env-file", help="环境变量文件；默认读取配置文件同目录的 .env")
     commands = root.add_subparsers(dest="command", required=True)
-    for name in ["status", "pause", "resume", "run", "once", "sync", "check", "retry"]:
+    for name in ["status", "pause", "resume", "run", "once", "sync", "check", "retry", "threads"]:
         commands.add_parser(name)
     backfill = commands.add_parser("backfill")
     backfill.add_argument("--start")
@@ -37,6 +37,12 @@ def parser():
     reconcile.add_argument("--verified-in-notion", action="store_true", required=True)
     cancel = commands.add_parser("cancel-backfill", help="停止后续补写；保留已生成记录与待写回任务")
     cancel.add_argument("task_id")
+    for name, argument in [("thread", "thread_id"), ("thread-recheck", "thread_id"), ("thread-adopt", "event_page_id")]:
+        commands.add_parser(name).add_argument(argument)
+    schema = commands.add_parser("threads-schema", help="事项结构预检或显式加法初始化")
+    action = schema.add_mutually_exclusive_group(required=True)
+    action.add_argument("--plan", action="store_true")
+    action.add_argument("--apply", action="store_true")
     return root
 
 
@@ -51,6 +57,24 @@ def main(argv=None):
     try:
         config = load_config(args.config, env_file=args.env_file)
         store = Store(config.db_path)
+        if args.command in {"threads", "thread", "thread-recheck"}:
+            from .threads import Threads
+            repo = Threads(store)
+            with store.lock():
+                if args.command == "threads":
+                    print_json(repo.list())
+                elif args.command == "thread":
+                    print_json(repo.summary(args.thread_id))
+                else:
+                    print_json({"task_id": repo.recheck(args.thread_id, stamp(now())), "queued": True})
+            return 0
+        if args.command == "threads-schema":
+            from .thread_schema import ThreadSchema
+            config.require_connections(model=False)
+            with store.lock():
+                schema = ThreadSchema(Notion(config), store)
+                print_json(schema.apply() if args.apply else schema.plan())
+            return 0
         if args.command == "status":
             print_json(store.status())
             return 0
@@ -63,6 +87,8 @@ def main(argv=None):
                 elif args.command == "retry":
                     with store.db:
                         store.db.execute("UPDATE outbox SET status='pending',attempts=0,next_at=NULL WHERE status='blocked'")
+                        store.db.execute("UPDATE thread_tasks SET status='pending',attempts=0,next_at=NULL,error_code=NULL WHERE status='blocked' AND output_run_id IS NULL")
+                        store.db.execute("UPDATE threads SET sync_status='pending',error_code=NULL WHERE sync_status='blocked'")
                         store.put("generation_failures", 0)
                         store.put("generation_blocked", False)
                         store.put("next_generation_at", None)
@@ -81,16 +107,23 @@ def main(argv=None):
                     "cursor": store.get("cursor"), "publication": "待下次 sync 或服务唤醒写回并核对"})
                 print_json(store.status())
             return 0
-        config.require_connections(model=args.command not in {"sync", "check"})
+        config.require_connections(model=args.command not in {"sync", "check", "thread-adopt"})
         engine = Engine(config, store, Notion(config), Model(config), now)
         if args.command == "run":
             with store.lock("daemon"):
                 return run_daemon(engine)
         with store.lock():
             if args.command == "check":
+                if engine.continuation:
+                    engine.continuation.check_schema()
                 context = engine.notion.context(stamp(now()), stamp(now()))
                 print_json({"notion_read": True, "resources": {k: len(context[k]) for k in ["memories", "events", "plans", "diaries"]},
                             "model_live_test": False, "writes": False})
+                return 0
+            if args.command == "thread-adopt":
+                if not engine.continuation:
+                    raise ValueError("thread-adopt 需要启用后续链")
+                print_json({"thread_id": engine.continuation.adopt(args.event_page_id, stamp(now())), "queued": True})
                 return 0
             if args.command == "once":
                 store.recover(stamp(now()))
@@ -118,9 +151,9 @@ def main(argv=None):
                 return 0 if result in {"done", "segments_pending"} else 1
             print_json({"result": result})
             return 0 if result in {"generated", "paused", "synced", "saved", "unchanged", "no_recorded_events"} else 1
-    except (ConfigError, ValueError, Busy, Conflict, RemoteError, InvalidOutput) as exc:
+    except (ConfigError, ValueError, Busy, Conflict, RemoteError, UncertainWrite, InvalidOutput) as exc:
         # Known exceptions contain safe fixed messages; never print raw provider responses.
-        if isinstance(exc, (ConfigError, Busy, Conflict, RemoteError)):
+        if isinstance(exc, (ConfigError, Busy, Conflict, RemoteError, UncertainWrite)):
             print(str(exc), file=sys.stderr)
         else:
             print(f"操作失败：{type(exc).__name__}；请检查参数或运行状态", file=sys.stderr)
@@ -145,7 +178,7 @@ def run_daemon(engine):
     with engine.store.lock():
         engine.store.recover(stamp(engine.clock()))
     while not stopping:
-        deadline = time.monotonic() + engine.config.interval_seconds
+        from .scheduler import wake_seconds
         try:
             with engine.store.lock():
                 result = engine.tick()
@@ -167,6 +200,7 @@ def run_daemon(engine):
         except (OSError, ValueError, KeyError, TypeError, sqlite3.Error):
             print("运行错误；本轮未确认成功，请查看状态", file=sys.stderr)
             return 1
+        deadline = time.monotonic() + wake_seconds(engine)
         while not stopping and time.monotonic() < deadline:
             time.sleep(min(1, max(0, deadline - time.monotonic())))
     return 0

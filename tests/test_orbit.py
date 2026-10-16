@@ -523,6 +523,27 @@ class ProtocolTests(unittest.TestCase):
         self.assertFalse(error.exception.retryable)
         self.assertNotIn("private-", str(error.exception))
 
+    def test_transport_incomplete_body_uses_bounded_safe_retries(self):
+        from http.client import IncompleteRead
+        class Interrupted:
+            calls = 0
+            def open(self, *args, **kwargs):
+                self.calls += 1
+                return self
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                pass
+            def read(self, size):
+                raise IncompleteRead(b"private-response-fragment", 100)
+        http = Transport(sleep=lambda seconds: None)
+        http.opener = Interrupted()
+        with self.assertRaises(RemoteError) as error:
+            http.request("Notion", "GET", "https://fixture.invalid/v1", {}, attempts=3)
+        self.assertEqual(http.opener.calls, 3)
+        self.assertEqual(error.exception.reason, "IncompleteRead")
+        self.assertNotIn("private-response", str(error.exception))
+
     def test_asia_shanghai_date_ignores_host_timezone(self):
         self.assertEqual(day(parse("2026-10-15T16:30:00+00:00")), "2026-10-16")
         with self.assertRaises(ValueError):
