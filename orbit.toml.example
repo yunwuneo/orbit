@@ -1,0 +1,24 @@
+# 公开配置；复制为 orbit.toml。凭据通过环境变量或同目录 .env 提供，不写在这里。
+[runtime]
+db_path = "var/orbit.sqlite3"
+interval_seconds = 600
+window_seconds = 600
+backfill_seconds = 600
+context_days = 7
+max_context_chars = 180000
+max_source_items = 2000
+recent_events = 12
+timeout_seconds = 45
+max_attempts = 5
+retention_days = 30
+
+[model]
+# Base URL 包含服务要求的 /v1 前缀；程序追加 /chat/completions。
+base_url = ""
+name = ""
+
+# pages/sources 的默认 ID 已对应现有 Echo Notion 结构，可按用途覆盖。
+# [pages]
+# rules = "3fb22e543e58810e8a35f8422cb29aa1"
+# [sources]
+# events = "676f2a53-0349-4afe-b173-7a7cc096430c"

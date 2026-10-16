@@ -1,0 +1,25 @@
+[Unit]
+Description=Orbit Echo life simulation
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=orbit
+Group=orbit
+WorkingDirectory=/opt/orbit
+EnvironmentFile=/etc/orbit/orbit.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/bin/python3 -m orbit --config /etc/orbit/orbit.toml run
+Restart=on-failure
+RestartSec=30
+TimeoutStopSec=180
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/orbit
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,172 @@
+"""Administrative CLI. Commands never print credentials or raw remote errors."""
+
+import argparse
+import json
+import os
+import signal
+import sqlite3
+import sys
+import time
+from datetime import timedelta
+
+from .config import ConfigError, load_config
+from .engine import Engine
+from .model import InvalidOutput, Model
+from .notion import Conflict, Notion
+from .store import Busy, Store
+from .timeutil import day, now, parse, stamp
+from .transport import RemoteError
+
+
+def parser():
+    root = argparse.ArgumentParser(prog="orbit", description="Echo Notion 生活模拟管理员")
+    root.add_argument("--config", default="orbit.toml")
+    root.add_argument("--env-file", help="环境变量文件；默认读取配置文件同目录的 .env")
+    commands = root.add_subparsers(dest="command", required=True)
+    for name in ["status", "pause", "resume", "run", "once", "sync", "check", "retry"]:
+        commands.add_parser(name)
+    backfill = commands.add_parser("backfill")
+    backfill.add_argument("--start")
+    backfill.add_argument("--end")
+    backfill.add_argument("--resume", dest="task_id")
+    backfill.add_argument("--max-segments", type=int, default=12)
+    diary = commands.add_parser("diary")
+    diary.add_argument("date", help="上海日期 YYYY-MM-DD，必须已经结束")
+    reconcile = commands.add_parser("confirm-absent", help="管理员核对远端确实未写入后才可使用")
+    reconcile.add_argument("write_id")
+    reconcile.add_argument("--verified-in-notion", action="store_true", required=True)
+    cancel = commands.add_parser("cancel-backfill", help="停止后续补写；保留已生成记录与待写回任务")
+    cancel.add_argument("task_id")
+    return root
+
+
+def print_json(value):
+    print(json.dumps(value, ensure_ascii=False, indent=2))
+
+
+def main(argv=None):
+    args = parser().parse_args(argv)
+    os.umask(0o077)
+    store = None
+    try:
+        config = load_config(args.config, env_file=args.env_file)
+        store = Store(config.db_path)
+        if args.command == "status":
+            print_json(store.status())
+            return 0
+        if args.command in {"pause", "resume", "retry", "confirm-absent", "cancel-backfill"}:
+            with store.lock():
+                if args.command == "pause":
+                    store.pause(stamp(now()))
+                elif args.command == "resume":
+                    store.resume(stamp(now()))
+                elif args.command == "retry":
+                    with store.db:
+                        store.db.execute("UPDATE outbox SET status='pending',attempts=0,next_at=NULL WHERE status='blocked'")
+                        store.put("generation_failures", 0)
+                        store.put("generation_blocked", False)
+                        store.put("next_generation_at", None)
+                elif args.command == "cancel-backfill":
+                    with store.db:
+                        cursor = store.db.execute("UPDATE backfills SET status='cancelled' WHERE id=? AND status!='done'", (args.task_id,))
+                        if cursor.rowcount != 1:
+                            raise ValueError("没有可取消的补写任务")
+                else:
+                    with store.db:
+                        cursor = store.db.execute("UPDATE outbox SET sent=0,status='pending',attempts=0,next_at=NULL WHERE id=? AND status!='done' AND sent=1", (args.write_id,))
+                        if cursor.rowcount != 1:
+                            raise ValueError("没有该待核对写入")
+                store.operational(config.pages["operations"], stamp(now()), {
+                    "command": args.command, "at": stamp(now()), "paused": store.get("paused", False),
+                    "cursor": store.get("cursor"), "publication": "待下次 sync 或服务唤醒写回并核对"})
+                print_json(store.status())
+            return 0
+        config.require_connections(model=args.command not in {"sync", "check"})
+        engine = Engine(config, store, Notion(config), Model(config), now)
+        if args.command == "run":
+            with store.lock("daemon"):
+                return run_daemon(engine)
+        with store.lock():
+            if args.command == "check":
+                context = engine.notion.context(stamp(now()), stamp(now()))
+                print_json({"notion_read": True, "resources": {k: len(context[k]) for k in ["memories", "events", "plans", "diaries"]},
+                            "model_live_test": False, "writes": False})
+                return 0
+            if args.command == "once":
+                store.recover(stamp(now()))
+                result = engine.tick()
+            elif args.command == "sync":
+                result = "synced" if engine.flush() else "writes_pending"
+            elif args.command == "diary":
+                result = engine.diary(args.date)
+            else:
+                if args.max_segments <= 0:
+                    raise ValueError("max-segments 必须大于零")
+                if args.task_id and (args.start or args.end):
+                    raise ValueError("续跑与新建补写参数不能混用")
+                if args.task_id:
+                    task_id = args.task_id
+                elif args.start and args.end:
+                    start, end = stamp(parse(args.start)), stamp(parse(args.end))
+                    if parse(end) > now():
+                        raise ValueError("不能补写现实未来")
+                    task_id = store.add_backfill(start, end)
+                else:
+                    raise ValueError("提供 start/end 或 resume 任务 ID")
+                result = engine.backfill(task_id, args.max_segments)
+                print_json({"backfill_id": task_id, "result": result})
+                return 0 if result in {"done", "segments_pending"} else 1
+            print_json({"result": result})
+            return 0 if result in {"generated", "paused", "synced", "saved", "unchanged", "no_recorded_events"} else 1
+    except (ConfigError, ValueError, Busy, Conflict, RemoteError, InvalidOutput) as exc:
+        # Known exceptions contain safe fixed messages; never print raw provider responses.
+        if isinstance(exc, (ConfigError, Busy, Conflict, RemoteError)):
+            print(str(exc), file=sys.stderr)
+        else:
+            print(f"操作失败：{type(exc).__name__}；请检查参数或运行状态", file=sys.stderr)
+        return 1
+    except (OSError, KeyError, TypeError, RuntimeError, sqlite3.Error):
+        print("操作失败；请检查配置、权限与运行状态（未输出敏感响应）", file=sys.stderr)
+        return 1
+    finally:
+        if store:
+            store.close()
+
+
+def run_daemon(engine):
+    stopping = False
+
+    def stop(signum, frame):
+        nonlocal stopping
+        stopping = True
+
+    signal.signal(signal.SIGINT, stop)
+    signal.signal(signal.SIGTERM, stop)
+    with engine.store.lock():
+        engine.store.recover(stamp(engine.clock()))
+    while not stopping:
+        deadline = time.monotonic() + engine.config.interval_seconds
+        try:
+            with engine.store.lock():
+                result = engine.tick()
+                yesterday = day(engine.clock() - timedelta(days=1))
+                if not engine.store.get("paused", False) and not engine.store.pending() and engine.generation_ready(stamp(engine.clock())):
+                    if engine.store.get("daily_checked") != yesterday:
+                        try:
+                            diary_result = engine.diary(yesterday)
+                            if diary_result in {"saved", "unchanged", "no_recorded_events"}:
+                                with engine.store.db:
+                                    engine.store.put("daily_checked", yesterday)
+                        except (RemoteError, Conflict, InvalidOutput) as exc:
+                            engine.failure(stamp(engine.clock()), exc)
+                print_json({"at": stamp(engine.clock()), "result": result})
+        except Busy:
+            pass
+        except (RemoteError, Conflict, InvalidOutput) as exc:
+            engine.failure(stamp(engine.clock()), exc)
+        except (OSError, ValueError, KeyError, TypeError, sqlite3.Error):
+            print("运行错误；本轮未确认成功，请查看状态", file=sys.stderr)
+            return 1
+        while not stopping and time.monotonic() < deadline:
+            time.sleep(min(1, max(0, deadline - time.monotonic())))
+    return 0

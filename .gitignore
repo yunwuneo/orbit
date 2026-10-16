@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+.env
+.env.*
+!.env.example
+/orbit.toml
+var/
+work/
+.venv/
+*.sqlite3*
