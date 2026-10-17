@@ -11,7 +11,9 @@
 5. 为 Notion 集成开放七个配置页面、日记子页面及记忆、生活事件、计划与约定数据源。运行会读取真实 schema；缺少属性或选项会阻塞写回，不会自行修改 schema。
 6. 按实际 Python 路径调整 `deploy/orbit.service`，复制到 systemd 服务目录，执行 `systemctl daemon-reload`，再启动 `orbit` 服务。
 
-不需要 pip 安装、Docker 镜像或 Node。根目录直接运行 `python3 -m orbit` 即可。服务的环境文件由 systemd 加载；终端管理命令可使用 `python3 -m orbit --config /etc/orbit/orbit.toml --env-file /etc/orbit/orbit.env check`，或将 `.env` 放在 TOML 同目录。优先级为进程环境变量 > 环境文件 > TOML。环境文件支持单行赋值、`export`、引号及注释，不执行 shell 或变量展开；不要把密钥放在命令行参数中。
+默认 OpenAI 兼容 API 接入不需要 pip 安装、Docker 镜像或 Node。根目录直接运行 `python3 -m orbit` 即可。服务的环境文件由 systemd 加载；终端管理命令可使用 `python3 -m orbit --config /etc/orbit/orbit.toml --env-file /etc/orbit/orbit.env check`，或将 `.env` 放在 TOML 同目录。优先级为进程环境变量 > 环境文件 > TOML。环境文件支持单行赋值、`export`、引号及注释，不执行 shell 或变量展开；不要把密钥放在命令行参数中。
+
+可选 `model.provider = "chatgpt"` 使用 ChatGPT OAuth 套餐与官方 Responses API，需要额外 JWT/加密依赖。按 [ChatGPT 接入](chatgpt-auth.md) 完成本机登录、VM 导入和最小推理验证。生产凭据路径使用 `/var/lib/orbit/chatgpt/credentials.json`，由服务用户所有，确保与现有 systemd 可写目录一致；不要放进只读的 `/etc/orbit` 或被 `ProtectHome` 屏蔽的家目录。原有 API Key 路线保留，程序不自动切换计费路径。
 
 部署前先在隔离的 Notion 副本和选定模型上完成联调。`check` 只证明独立 Token 可读取资料，不证明写权限或模型协议已通过。确认实际回应、时间、来源、计划状态和写后核对后，再指向正式数据。
 

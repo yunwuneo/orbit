@@ -1,18 +1,21 @@
 # Orbit
 
-以 Notion 为权威资料中心、按上海现实时间推进的 Echo 生活模拟服务。面向日本云服务器独立部署，仅使用 Python 3.11+ 标准库与 SQLite，不需要安装第三方依赖。
+以 Notion 为权威资料中心、按上海现实时间推进的 Echo 生活模拟服务。面向日本云服务器独立部署。默认 OpenAI 兼容 API 接入仅使用 Python 3.11+ 标准库与 SQLite；可选的 ChatGPT OAuth 接入需要 JWT 签名校验依赖。
 
 已有初版实现，55 项本地测试及真实模型、隔离 Notion 写回、单轮常驻进程联调已通过。**正式持续运行、云服务器部署和长期稳定性尚未验收**。测试范围、发现的兼容问题与修复见 [联调报告](docs/live-acceptance-2026-10-16.md)，需求覆盖见 [实现与验收记录](docs/implementation.md)。
 
-事件后续链已完成本地实现，默认关闭；当前 98 项本地测试通过。虚构隔离区的真实模型与 Notion 链路已完成一次有限验收，正式启用、持续运行及部署尚未验收。证据见 [后续链实现记录](docs/event-continuation-implementation.md) 和 [真实验收报告](docs/event-continuation-live-acceptance-2026-10-16.md)，设计要求见 [实现规格](docs/event-continuation-spec.md)。
+事件后续链已完成本地实现，默认关闭；该轮 98 项本地测试通过。虚构隔离区的真实模型与 Notion 链路已完成一次有限验收，正式启用、持续运行及部署尚未验收。证据见 [后续链实现记录](docs/event-continuation-implementation.md) 和 [真实验收报告](docs/event-continuation-live-acceptance-2026-10-16.md)，设计要求见 [实现规格](docs/event-continuation-spec.md)。
+
+新增可选的 ChatGPT 套餐 OAuth／Responses 接入，保留原有兼容 API 配置与调用格式。完整 135 项离线测试通过，包含认证、刷新、签名校验及流中断；真实 ChatGPT 授权、套餐资格、模型与云部署尚未验收。操作见 [ChatGPT 接入](docs/chatgpt-auth.md)。
 
 ## 配置与启动
 
-复制 `orbit.toml.example` 为 `orbit.toml`，填写模型 Base URL 和 Model Name。Base URL 包含供应商要求的 `/v1` 前缀，程序追加 `/chat/completions`。凭据从环境变量读取：
+复制 `orbit.toml.example` 为 `orbit.toml`。默认 `model.provider = "openai_compatible"`，填写模型 Base URL 和 Model Name。旧配置没有 `provider` 时行为相同。Base URL 包含供应商要求的 `/v1` 前缀，程序追加 `/chat/completions`。凭据从环境变量读取：
 
 - `ORBIT_MODEL_API_KEY`：所选 OpenAI 兼容服务的密钥。
 - `ORBIT_NOTION_TOKEN`：独立 Notion 集成的 Token。需为其开放配置中的页面和三个数据源；Codex 连接器授权不会自动转交给服务器进程。
 - `ORBIT_MODEL_BASE_URL`、`ORBIT_MODEL_NAME` 可覆盖 TOML 中的公开模型配置。
+- `ORBIT_MODEL_PROVIDER` 可覆盖接入方式；`ORBIT_CHATGPT_AUTH_FILE` 可覆盖独立 OAuth 凭据路径。ChatGPT 模式不需要模型 API Key，也不会把 OAuth Token 发往自定义 Base URL。
 
 程序自动读取配置文件同目录的 `.env`（默认是项目根目录），可将 `.env.example` 复制为 `.env` 后填写。优先级为：**进程环境变量 > `.env` > TOML 配置**；不会修改进程环境变量。`.env` 已被 Git 忽略，建议权限设为 `0600`。
 

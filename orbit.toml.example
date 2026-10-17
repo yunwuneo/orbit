@@ -14,9 +14,16 @@ max_attempts = 5
 retention_days = 30
 
 [model]
-# Base URL 包含服务要求的 /v1 前缀；程序追加 /chat/completions。
+# 默认保留原有接入。可选 chatgpt，使用独立 OAuth 凭据与官方 Responses API。
+provider = "openai_compatible"
+# openai_compatible：Base URL 包含 /v1 前缀；程序追加 /chat/completions。
+# chatgpt：忽略 base_url/API Key，固定使用 https://api.openai.com/v1/responses。
 base_url = ""
 name = ""
+
+[chatgpt]
+# 相对本 TOML 文件所在目录；目录 0700、凭据 0600，不写入 SQLite/Notion。
+auth_file = "var/chatgpt/credentials.json"
 
 # 默认关闭；先显式初始化和核对 schema，再填写 sources.threads 并启用。
 [continuation]

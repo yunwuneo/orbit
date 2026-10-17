@@ -43,6 +43,14 @@ def parser():
     action = schema.add_mutually_exclusive_group(required=True)
     action.add_argument("--plan", action="store_true")
     action.add_argument("--apply", action="store_true")
+    login = commands.add_parser("chatgpt-login", help="Continue with ChatGPT；在本机浏览器手动打开授权链接")
+    login.add_argument("--port", type=int, default=1455, help="本机 127.0.0.1 回调端口；0 自动分配")
+    login.add_argument("--timeout", type=int, default=180, help="等待授权秒数，1–600")
+    login.add_argument("--new-account", action="store_true", help="添加账号注册，不覆盖已有账号")
+    for name in ["chatgpt-status", "chatgpt-models", "chatgpt-logout", "chatgpt-test"]:
+        commands.add_parser(name)
+    commands.add_parser("chatgpt-use", help="选择已有账号注册").add_argument("client_id")
+    commands.add_parser("chatgpt-import", help="导入受保护的 Orbit 凭据文件；保留本机 Host ID").add_argument("file")
     return root
 
 
@@ -56,6 +64,8 @@ def main(argv=None):
     store = None
     try:
         config = load_config(args.config, env_file=args.env_file)
+        if args.command.startswith("chatgpt-"):
+            return chatgpt_command(args, config)
         store = Store(config.db_path)
         if args.command in {"threads", "thread", "thread-recheck"}:
             from .threads import Threads
@@ -164,6 +174,40 @@ def main(argv=None):
     finally:
         if store:
             store.close()
+
+
+def chatgpt_command(args, config):
+    from dataclasses import replace
+    from .chatgpt import ChatGPT
+    from .chatgpt_auth import ChatGPTAuth
+    from .chatgpt_transport import ChatGPTTransport
+    auth = ChatGPTAuth(config.chatgpt_auth_file, ChatGPTTransport(config.timeout_seconds))
+    if args.command == "chatgpt-login":
+        result = auth.login(args.port, args.timeout, args.new_account)
+    elif args.command == "chatgpt-status":
+        result = auth.status()
+    elif args.command == "chatgpt-logout":
+        result = auth.logout()
+    elif args.command == "chatgpt-use":
+        auth.select(args.client_id)
+        result = auth.status()
+    elif args.command == "chatgpt-import":
+        auth.import_file(args.file)
+        result = auth.status()
+    elif args.command == "chatgpt-models":
+        result = {"models": ChatGPT(config, http=auth.http, auth=auth).models()}
+    else:
+        # Explicit small inference only; no Notion, database or life simulation.
+        model_config = replace(config, model_provider="chatgpt")
+        output = Model(model_config).complete('只返回 JSON 对象 {"ok":true}。', {"purpose": "connection_test"})
+        if output != {"ok": True}:
+            raise InvalidOutput("连接测试没有返回预期 JSON")
+        result = {"model_live_test": True, "completed": True, "notion_writes": False}
+    print_json(result)
+    if args.command == "chatgpt-logout" and not result["revocation_confirmed"]:
+        print("本地已退出，但未确认远端撤销；请在 ChatGPT 设置中断开 Orbit。", file=sys.stderr)
+        return 1
+    return 0
 
 
 def run_daemon(engine):

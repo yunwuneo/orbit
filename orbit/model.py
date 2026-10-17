@@ -1,4 +1,4 @@
-"""Portable chat/completions protocol and Echo-owned decisions."""
+"""Selectable model protocols and Echo-owned decisions."""
 
 import json
 from .store import encode
@@ -59,26 +59,37 @@ class Model:
     def __init__(self, config, transport=None):
         self.config = config
         self.http = transport or Transport(config.timeout_seconds)
+        self.chatgpt = None
+        if config.model_provider == "chatgpt":
+            from .chatgpt import ChatGPT
+            self.chatgpt = ChatGPT(config, http=transport)
 
     def complete(self, system, data):
-        response = self.http.request("Model", "POST", self.config.model_base_url.rstrip("/") + "/chat/completions",
-                                     {"Authorization": "Bearer " + self.config.model_key},
-                                     {"model": self.config.model_name,
-                                      "messages": [{"role": "system", "content": system},
-                                                   {"role": "user", "content": encode(data)}]}, attempts=3)
+        protected = [self.config.model_key, self.config.notion_token]
+        if self.chatgpt:
+            raw, oauth_secrets = self.chatgpt.complete(system, encode(data))
+            protected.extend(oauth_secrets)
+        else:
+            response = self.http.request("Model", "POST", self.config.model_base_url.rstrip("/") + "/chat/completions",
+                                         {"Authorization": "Bearer " + self.config.model_key},
+                                         {"model": self.config.model_name,
+                                          "messages": [{"role": "system", "content": system},
+                                                       {"role": "user", "content": encode(data)}]}, attempts=3)
         try:
-            choice = response["choices"][0]
-            if choice.get("finish_reason") not in {None, "stop"}:
-                raise InvalidOutput("模型输出未完整结束")
-            raw = choice["message"]["content"]
+            if not self.chatgpt:
+                choice = response["choices"][0]
+                if choice.get("finish_reason") not in {None, "stop"}:
+                    raise InvalidOutput("模型输出未完整结束")
+                raw = choice["message"]["content"]
             if not isinstance(raw, str) or len(raw) > 100000:
                 raise InvalidOutput("模型输出格式或大小不正确")
             result = json.loads(raw)
             if not isinstance(result, dict):
                 raise InvalidOutput("模型必须输出 JSON 对象")
             # Never persist echoed credentials, including in pending payloads or Notion.
-            for secret in [self.config.model_key, self.config.notion_token]:
-                if secret and secret in raw:
+            decoded = encode(result)
+            for secret in protected:
+                if secret and (secret in raw or secret in decoded):
                     raise InvalidOutput("模型输出包含受保护内容")
             return result
         except (KeyError, IndexError, TypeError, json.JSONDecodeError):

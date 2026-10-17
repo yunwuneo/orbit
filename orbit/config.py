@@ -55,6 +55,8 @@ class Config:
     retention_days: int = 30
     model_base_url: str = ""
     model_name: str = ""
+    model_provider: str = "openai_compatible"
+    chatgpt_auth_file: str = "var/chatgpt/credentials.json"
     model_key: str = field(default="", repr=False)
     notion_token: str = field(default="", repr=False)
     pages: dict = field(default_factory=lambda: dict(PAGES))
@@ -62,11 +64,20 @@ class Config:
     continuation: Continuation = field(default_factory=Continuation)
 
     def require_connections(self, model=True):
-        required = [self.notion_token] + ([self.model_base_url, self.model_name, self.model_key] if model else [])
-        if not all(isinstance(v, str) and v.strip() for v in required):
-            raise ConfigError("需要配置模型 Base URL、API Key、Model Name 及 Notion Token")
-        if not model:
+        if not isinstance(self.notion_token, str) or not self.notion_token.strip():
+            raise ConfigError("需要配置 Notion Token")
+        if model:
+            self.require_model()
+
+    def require_model(self):
+        if self.model_provider not in {"openai_compatible", "chatgpt"}:
+            raise ConfigError("model.provider 必须是 openai_compatible 或 chatgpt")
+        if not isinstance(self.model_name, str) or not self.model_name.strip():
+            raise ConfigError("需要配置 Model Name")
+        if self.model_provider == "chatgpt":
             return
+        if not all(isinstance(v, str) and v.strip() for v in [self.model_base_url, self.model_key]):
+            raise ConfigError("需要配置模型 Base URL、API Key、Model Name")
         url = urlsplit(self.model_base_url)
         if url.scheme != "https" or not url.hostname or url.username or url.password or url.query or url.fragment:
             raise ConfigError("模型 Base URL 必须是不含凭据、查询串的 HTTPS 地址")
@@ -118,13 +129,14 @@ def load_config(path="orbit.toml", env_file=None):
                            required=env_file is not None)
     environment = {**file_env, **os.environ}
     raw = tomllib.loads(p.read_text()) if p.exists() else {}
-    allowed = {"runtime", "model", "pages", "sources", "continuation"}
+    allowed = {"runtime", "model", "chatgpt", "pages", "sources", "continuation"}
     if raw.keys() - allowed:
         raise ConfigError("未知配置段")
     runtime = raw.get("runtime", {})
     keys = {"db_path", "interval_seconds", "window_seconds", "backfill_seconds", "context_days",
             "max_context_chars", "max_source_items", "recent_events", "timeout_seconds", "max_attempts", "retention_days"}
-    if runtime.keys() - keys or raw.get("model", {}).keys() - {"base_url", "name"}:
+    if (runtime.keys() - keys or raw.get("model", {}).keys() - {"base_url", "name", "provider"}
+            or raw.get("chatgpt", {}).keys() - {"auth_file"}):
         raise ConfigError("未知配置项；凭据请通过环境变量或 .env 提供")
     pages, sources = dict(PAGES), dict(SOURCES)
     for target, name in [(pages, "pages"), (sources, "sources")]:
@@ -149,6 +161,8 @@ def load_config(path="orbit.toml", env_file=None):
     if continuation.default_check_seconds < continuation.min_check_seconds:
         raise ConfigError("默认检查间隔不能小于最小间隔")
     config = Config(**runtime, pages=pages, sources=sources, continuation=continuation,
+                    model_provider=environment.get("ORBIT_MODEL_PROVIDER", raw.get("model", {}).get("provider", "openai_compatible")),
+                    chatgpt_auth_file=environment.get("ORBIT_CHATGPT_AUTH_FILE", raw.get("chatgpt", {}).get("auth_file", "var/chatgpt/credentials.json")),
                     model_base_url=environment.get("ORBIT_MODEL_BASE_URL", raw.get("model", {}).get("base_url", "")),
                     model_name=environment.get("ORBIT_MODEL_NAME", raw.get("model", {}).get("name", "")),
                     model_key=environment.get("ORBIT_MODEL_API_KEY", ""),
@@ -163,4 +177,11 @@ def load_config(path="orbit.toml", env_file=None):
         raise ConfigError("唤醒间隔不能大于实时窗口")
     if not isinstance(config.db_path, str) or not config.db_path:
         raise ConfigError("db_path 必须是文件路径")
+    if config.model_provider not in {"openai_compatible", "chatgpt"}:
+        raise ConfigError("model.provider 必须是 openai_compatible 或 chatgpt")
+    if not isinstance(config.chatgpt_auth_file, str) or not config.chatgpt_auth_file.strip():
+        raise ConfigError("chatgpt.auth_file 必须是文件路径")
+    # Unlike the historic database path, the new credential path is relative to the TOML.
+    from dataclasses import replace
+    config = replace(config, chatgpt_auth_file=str(p.parent / Path(config.chatgpt_auth_file).expanduser()))
     return config
