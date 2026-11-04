@@ -2,6 +2,7 @@ import SwiftUI
 
 struct ChatView: View {
     @State var engine: ChatEngine
+    let worldEngine: WorldEngine
     let protagonistName: String
 
     @State private var input = ""
@@ -9,6 +10,19 @@ struct ChatView: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            if worldEngine.isTicking {
+                HStack(spacing: 6) {
+                    ProgressView()
+                        .controlSize(.mini)
+                    Text("世界流转中…")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 5)
+                .background(.bar)
+            }
+
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(spacing: 10) {

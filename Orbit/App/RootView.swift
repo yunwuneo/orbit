@@ -5,8 +5,16 @@ struct RootView: View {
     let database: AppDatabase
     let llmStore: LLMConfigurationStore
 
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var worldEngine: WorldEngine
     @State private var showSettings = false
     @State private var protagonist: Protagonist?
+
+    init(database: AppDatabase, llmStore: LLMConfigurationStore) {
+        self.database = database
+        self.llmStore = llmStore
+        _worldEngine = State(initialValue: WorldEngine(db: database.db, llmStore: llmStore))
+    }
 
     var body: some View {
         NavigationStack {
@@ -14,6 +22,7 @@ struct RootView: View {
                 if let protagonist {
                     ChatView(
                         engine: ChatEngine(db: database.db, llmStore: llmStore),
+                        worldEngine: worldEngine,
                         protagonistName: protagonist.name)
                 } else {
                     WizardView(state: WizardState(db: database.db, llmStore: llmStore)) {
@@ -40,6 +49,12 @@ struct RootView: View {
                 }
             }
             .onAppear(perform: loadProtagonist)
+            .task { await worldEngine.tickIfNeeded() }
+            .onChange(of: scenePhase) { _, phase in
+                if phase == .active {
+                    Task { await worldEngine.tickIfNeeded() }
+                }
+            }
         }
     }
 
