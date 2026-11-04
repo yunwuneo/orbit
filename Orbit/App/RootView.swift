@@ -12,17 +12,9 @@ struct RootView: View {
         NavigationStack {
             Group {
                 if let protagonist {
-                    // 世界已点火（对话引擎在下一步接入）
-                    VStack(spacing: 16) {
-                        Image(systemName: "sparkles")
-                            .font(.system(size: 56))
-                            .foregroundStyle(.secondary)
-                        Text("\(protagonist.name) 的世界已点火")
-                            .font(.title2)
-                        Text("对话引擎即将接入。")
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                    }
+                    ChatView(
+                        engine: ChatEngine(db: database.db, llmStore: llmStore),
+                        protagonistName: protagonist.name)
                 } else {
                     WizardView(state: WizardState(db: database.db, llmStore: llmStore)) {
                         loadProtagonist()
