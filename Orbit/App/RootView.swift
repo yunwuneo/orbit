@@ -1,29 +1,38 @@
 import SwiftUI
+import GRDB
 
 struct RootView: View {
     let database: AppDatabase
     let llmStore: LLMConfigurationStore
 
     @State private var showSettings = false
+    @State private var protagonist: Protagonist?
 
     var body: some View {
         NavigationStack {
-            VStack(spacing: 16) {
-                Image(systemName: "moon.stars.circle.fill")
-                    .font(.system(size: 64))
-                    .foregroundStyle(.secondary)
-                Text("世界尚未点火")
-                    .font(.title2)
-                Text("完成人设向导后，TA 的世界将开始运转。")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
+            Group {
+                if let protagonist {
+                    // 世界已点火（对话引擎在下一步接入）
+                    VStack(spacing: 16) {
+                        Image(systemName: "sparkles")
+                            .font(.system(size: 56))
+                            .foregroundStyle(.secondary)
+                        Text("\(protagonist.name) 的世界已点火")
+                            .font(.title2)
+                        Text("对话引擎即将接入。")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+                } else {
+                    WizardView(state: WizardState(db: database.db, llmStore: llmStore)) {
+                        loadProtagonist()
+                    }
+                }
             }
-            .navigationTitle("Orbit")
+            .navigationTitle(protagonist?.name ?? "Orbit")
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button {
-                        showSettings = true
-                    } label: {
+                    Button { showSettings = true } label: {
                         Image(systemName: "gearshape")
                     }
                 }
@@ -38,10 +47,18 @@ struct RootView: View {
                         }
                 }
             }
+            .onAppear(perform: loadProtagonist)
+        }
+    }
+
+    private func loadProtagonist() {
+        protagonist = try? database.db.read { db in
+            try Protagonist.fetchOne(db, key: Protagonist.singletonID)
         }
     }
 }
 
 #Preview {
-    RootView(database: try! .inMemory(), llmStore: LLMConfigurationStore(db: try! AppDatabase.inMemory().db))
+    let db = try! AppDatabase.inMemory()
+    return RootView(database: db, llmStore: LLMConfigurationStore(db: db.db))
 }
