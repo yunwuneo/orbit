@@ -11,6 +11,7 @@ import GRDB
 final class ChatEngine {
     let db: DatabaseQueue
     let llmStore: LLMConfigurationStore
+    let distiller: UserModelDistiller
 
     var messages: [ChatMessage] = []
     var streamingText = ""
@@ -20,6 +21,7 @@ final class ChatEngine {
     init(db: DatabaseQueue, llmStore: LLMConfigurationStore) {
         self.db = db
         self.llmStore = llmStore
+        self.distiller = UserModelDistiller(db: db, llmStore: llmStore)
     }
 
     func loadHistory(limit: Int = 50) {
@@ -73,6 +75,8 @@ final class ChatEngine {
             }
             streamingText = ""
             loadHistory()
+            // 聊完一轮，后台沉淀用户模型（主角越聊越懂你）
+            Task { await distiller.distillIfNeeded() }
         } catch {
             lastError = error.localizedDescription
         }
