@@ -1,0 +1,27 @@
+name: Orbit
+options:
+  bundleIdPrefix: cn.neo7
+  deploymentTarget:
+    iOS: "26.0"
+packages:
+  GRDB:
+    url: https://github.com/groue/GRDB.swift.git
+    from: 7.0.0
+targets:
+  Orbit:
+    type: application
+    platform: iOS
+    sources:
+      - Orbit
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: cn.neo7.orbit
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_UISupportedInterfaceOrientations: UIInterfaceOrientationPortrait
+        SWIFT_VERSION: "6.0"
+        TARGETED_DEVICE_FAMILY: "1"
+        MARKETING_VERSION: "0.1.0"
+    dependencies:
+      - package: GRDB
+        product: GRDB

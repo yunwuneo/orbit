@@ -1,0 +1,17 @@
+# Xcode
+build/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+*.xcscmblueprint
+*.xccheckout
+
+# Generated project (XcodeGen 产物，可随时重新生成)
+Orbit.xcodeproj/
+
+# SwiftPM
+.swiftpm/
+.build/
+
+# macOS
+.DS_Store
