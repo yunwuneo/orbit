@@ -104,7 +104,12 @@ final class ChatEngine {
                     .filter(Column("status") == OpenLoop.Status.open.rawValue)
                     .order(Column("createdAt").desc)
                     .limit(5)
-                    .fetchAll(db)
+                    .fetchAll(db),
+                lastUserAt: try ChatMessage
+                    .filter(Column("role") == ChatMessage.Role.user.rawValue)
+                    .order(Column("sentAt").desc)
+                    .fetchOne(db)?.sentAt,
+                absenceRule: try Setting.fetchOne(db, key: WorldSettingKey.absenceInstruction)?.value ?? ""
             )
         }
 
@@ -179,6 +184,16 @@ final class ChatEngine {
             if !s.currentActivity.isEmpty { nowLines.append("你正在：\(s.currentActivity)") }
             if !s.mood.isEmpty { nowLines.append("心情：\(s.mood)") }
             if !s.currentConcern.isEmpty { nowLines.append("正在烦的事：\(s.currentConcern)") }
+        }
+        // 用户缺席超过一天：告诉她多久没来了，以及用户定下的缺席反应规则
+        if let lastUserAt = context.lastUserAt {
+            let gapDays = Int(Date().timeIntervalSince(lastUserAt) / 86400)
+            if gapDays >= 1 {
+                nowLines.append("TA 已经 \(gapDays) 天没来找你了")
+                if !context.absenceRule.isEmpty {
+                    nowLines.append("关于你如何面对 TA 的缺席：\(context.absenceRule)")
+                }
+            }
         }
         system += "\n\n【此刻】\n" + nowLines.joined(separator: "\n")
 

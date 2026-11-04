@@ -1,6 +1,14 @@
 import Foundation
 import GRDB
 
+/// 世界策略相关的设置键
+enum WorldSettingKey {
+    /// "true" 时世界冻结：不推演，解冻时从当下重新计时（跳过的日子不补）
+    static let paused = "world.paused"
+    /// 用户定下的缺席反应规则（用户定规则，人设定表达）
+    static let absenceInstruction = "absence.instruction"
+}
+
 /// 世界引擎（GodView 的 v1 形态）：惰性快进。
 ///
 /// 不实时空跑模拟——用户回来时，计算距上次滴答的时长，
@@ -20,17 +28,21 @@ final class WorldEngine {
     /// 快进窗口上限：超出部分压缩成一条背景事件
     static let maxFastForwardDays = 7
 
-    private static let lastTickKey = "world.lastTickAt"
+    static let lastTickKey = "world.lastTickAt"
 
     init(db: DatabaseQueue, llmStore: LLMConfigurationStore) {
         self.db = db
         self.llmStore = llmStore
     }
 
+    var isPaused: Bool {
+        (try? db.read { try Setting.fetchOne($0, key: WorldSettingKey.paused)?.value == "true" }) ?? false
+    }
+
     // MARK: - 滴答入口
 
     func tickIfNeeded() async {
-        guard !isTicking else { return }
+        guard !isTicking, !isPaused else { return }
         let now = Date()
         let lastTick = lastTickAt() ?? ignitionAt() ?? now
         let elapsed = now.timeIntervalSince(lastTick)
@@ -124,6 +136,21 @@ final class WorldEngine {
 
         let eventLines = context.recentEvents.map { "- \($0.summary)" }.joined(separator: "\n")
 
+        // 用户缺席超过一天时，注入用户定下的缺席反应规则
+        var absenceBlock = ""
+        if hours >= 24 {
+            let rule: String? = try? await db.read { db in
+                try Setting.fetchOne(db, key: WorldSettingKey.absenceInstruction)?.value
+            }
+            if let rule, !rule.isEmpty {
+                absenceBlock = """
+
+                用户缺席了 \(hours / 24) 天。用户为这种情况定下的规则：「\(rule)」
+                推演主角的事件、状态与 reachOut 时遵守这个规则。
+                """
+            }
+        }
+
         let system = """
         你是「上帝视角」，掌管 \(p.name) 的生活世界。\(p.gender)，\(p.occupation)。
         性格：\(p.temperament.map(\.choice).joined(separator: "、"))
@@ -139,7 +166,7 @@ final class WorldEngine {
 
         悬而未决的线索：
         \(loopLines.isEmpty ? "（无）" : loopLines)
-
+        \(absenceBlock)
         你的任务：快进推演【\(windowDescription)】里这个世界发生的事。规则：
         1. 事件要符合作息与身份，符合性格；日常为主，偶尔有小波澜，不要天天高潮
         2. 窗口在 36 小时内给 2~4 个事件；超过则每天 1~2 个、总量不超过 10 个

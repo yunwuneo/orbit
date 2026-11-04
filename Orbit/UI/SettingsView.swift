@@ -1,4 +1,5 @@
 import SwiftUI
+import GRDB
 
 /// BYOK 设置页：双层端点配置。Key 只进 Keychain，不落数据库。
 struct SettingsView: View {
@@ -6,6 +7,7 @@ struct SettingsView: View {
 
     var body: some View {
         Form {
+            WorldSection(db: store.db)
             ForEach(LLMTier.allCases, id: \.self) { tier in
                 TierSection(store: store, tier: tier)
             }
@@ -15,7 +17,60 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
             }
         }
-        .navigationTitle("模型设置")
+        .navigationTitle("设置")
+    }
+}
+
+/// 世界策略：暂停世界 + 缺席反应规则（用户定规则，人设定表达）
+private struct WorldSection: View {
+    let db: DatabaseQueue
+
+    @State private var paused = false
+    @State private var absenceInstruction = ""
+
+    var body: some View {
+        Section {
+            Toggle("暂停世界", isOn: $paused)
+            TextField("缺席时 TA 的反应规则", text: $absenceInstruction, axis: .vertical)
+                .lineLimit(2...5)
+        } header: {
+            Text("世界")
+        } footer: {
+            Text("暂停后世界冻结，恢复时从当下继续，跳过的日子不补。缺席规则示例：「她会担心，但嘴上说没事」——你定规则，人设决定怎么表达。")
+        }
+        .onAppear { load() }
+        .onChange(of: paused) { _, newValue in savePaused(newValue) }
+        .onChange(of: absenceInstruction) { _, newValue in saveAbsenceInstruction(newValue) }
+    }
+
+    private func load() {
+        paused = (try? db.read {
+            try Setting.fetchOne($0, key: WorldSettingKey.paused)?.value == "true"
+        }) ?? false
+        absenceInstruction = (try? db.read {
+            try Setting.fetchOne($0, key: WorldSettingKey.absenceInstruction)?.value ?? ""
+        }) ?? ""
+    }
+
+    private func savePaused(_ newValue: Bool) {
+        try? db.write { db in
+            var setting = Setting(key: WorldSettingKey.paused, value: newValue ? "true" : "false")
+            try setting.save(db)
+            // 解冻时从当下重新计时：暂停期间的日子不快进补演
+            if !newValue {
+                var tick = Setting(
+                    key: WorldEngine.lastTickKey,
+                    value: ISO8601DateFormatter().string(from: Date()))
+                try tick.save(db)
+            }
+        }
+    }
+
+    private func saveAbsenceInstruction(_ text: String) {
+        try? db.write { db in
+            var setting = Setting(key: WorldSettingKey.absenceInstruction, value: text)
+            try setting.save(db)
+        }
     }
 }
 
