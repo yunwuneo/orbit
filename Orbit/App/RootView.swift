@@ -51,8 +51,19 @@ struct RootView: View {
             .onAppear(perform: loadProtagonist)
             .task { await worldEngine.tickIfNeeded() }
             .onChange(of: scenePhase) { _, phase in
-                if phase == .active {
-                    Task { await worldEngine.tickIfNeeded() }
+                switch phase {
+                case .active:
+                    Task {
+                        await ProactiveNotifier.cancelPending()
+                        await worldEngine.tickIfNeeded()
+                    }
+                case .background:
+                    Task {
+                        await ProactiveNotifier.schedulePendingMessages(
+                            db: database.db, protagonistName: protagonist?.name ?? "Orbit")
+                    }
+                default:
+                    break
                 }
             }
         }

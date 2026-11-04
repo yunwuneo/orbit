@@ -78,6 +78,10 @@ struct ChatView: View {
         .navigationTitle(protagonistName)
         .navigationBarTitleDisplayMode(.inline)
         .onAppear { engine.loadHistory() }
+        // 主角的主动消息带未来时间戳：App 开着时每分钟检查一次是否到点
+        .onReceive(Timer.publish(every: 60, on: .main, in: .common).autoconnect()) { _ in
+            engine.loadHistory()
+        }
     }
 
     private func scrollToBottom(_ proxy: ScrollViewProxy) {

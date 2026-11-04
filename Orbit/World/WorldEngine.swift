@@ -70,11 +70,17 @@ final class WorldEngine {
         var action: String        // advance / resolve / drop
         var note: String
     }
+    struct ReachOutPayload: Codable, Sendable {
+        var shouldReachOut: Bool
+        var afterHours: Double     // 窗口内什么时候发（0 = 立即）
+        var text: String           // 主角口吻的一条消息
+    }
     struct TickResult: Codable, Sendable {
         var events: [TickEventPayload]
         var protagonistState: StatePayload
         var loopUpdates: [LoopUpdatePayload]
         var newLoops: [String]
+        var reachOut: ReachOutPayload
     }
 
     private func runGodView(client: LLMClient, from start: Date, to end: Date) async throws -> TickResult {
@@ -143,6 +149,10 @@ final class WorldEngine {
         6. dayOffset：今天 0，昨天 -1，以此类推
         7. 最后给出主角此刻的状态：心情、正在做的事（结合当前时刻 \(formatter.string(from: end)) 与作息）、正在烦的事
         8. summary 控制在 25 字以内，从主角视角写（第一人称感受优先）
+        9. reachOut：这段时间里主角有理由主动联系用户吗（想念、有好事想分享、遇到了事想吐槽）？
+           有就 shouldReachOut=true，text 写一条主角口吻的真实聊天消息（30 字以内，像微信消息，不要解释）；
+           afterHours 是从现在算起几小时后发（0 = 立即，结合作息选个合理时刻）。
+           没有自然理由就 false，不要硬凑
         """
 
         return try await client.structured(
@@ -191,8 +201,18 @@ final class WorldEngine {
                         ],
                     ],
                     "newLoops": ["type": "array", "items": ["type": "string"]],
+                    "reachOut": [
+                        "type": "object",
+                        "properties": [
+                            "shouldReachOut": ["type": "boolean"],
+                            "afterHours": ["type": "number"],
+                            "text": ["type": "string"],
+                        ],
+                        "required": ["shouldReachOut", "afterHours", "text"],
+                        "additionalProperties": false,
+                    ],
                 ],
-                "required": ["events", "protagonistState", "loopUpdates", "newLoops"],
+                "required": ["events", "protagonistState", "loopUpdates", "newLoops", "reachOut"],
                 "additionalProperties": false,
             ]),
             as: TickResult.self)
@@ -260,6 +280,24 @@ final class WorldEngine {
                     expectedAdvanceAt: nil, status: .open,
                     sourceEventID: nil, createdAt: now, resolvedAt: nil)
                 try loop.insert(db)
+            }
+
+            // 主动消息：以未来 sentAt 落库，到点才在聊天里浮现；
+            // 已有一条待送达的就不再叠加
+            if result.reachOut.shouldReachOut {
+                let text = result.reachOut.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !text.isEmpty {
+                    let fireAt = now.addingTimeInterval(max(0, min(result.reachOut.afterHours, 72)) * 3600)
+                    let pendingCount = try ChatMessage
+                        .filter(Column("role") == ChatMessage.Role.protagonist.rawValue && Column("sentAt") > now)
+                        .fetchCount(db)
+                    if pendingCount == 0 {
+                        var message = ChatMessage(
+                            id: nil, role: .protagonist, content: text,
+                            sentAt: fireAt, relatedEventIDs: [])
+                        try message.insert(db)
+                    }
+                }
             }
         }
 

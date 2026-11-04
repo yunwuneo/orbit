@@ -27,6 +27,8 @@ final class ChatEngine {
     func loadHistory(limit: Int = 50) {
         messages = (try? db.read { db in
             try ChatMessage
+                // 主动消息可能带未来时间戳：到点才浮现
+                .filter(Column("sentAt") <= Date())
                 .order(Column("sentAt").desc)
                 .limit(limit)
                 .fetchAll(db)
