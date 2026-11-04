@@ -69,6 +69,17 @@ struct LLMConfigurationStore: Sendable {
         let config = endpoint(for: tier)
         let key = apiKey(for: tier)
         guard config.isComplete, !key.isEmpty else { return nil }
-        return LLMClient(config: config, apiKey: key)
+        var client = LLMClient(config: config, apiKey: key)
+        client.usageHandler = { [db] usage in
+            try? db.write { db in
+                var record = UsageRecord(
+                    id: nil, tier: tier.rawValue, model: config.model,
+                    promptTokens: usage.promptTokens,
+                    completionTokens: usage.completionTokens,
+                    createdAt: Date())
+                try record.insert(db)
+            }
+        }
+        return client
     }
 }

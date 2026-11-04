@@ -8,6 +8,7 @@ struct SettingsView: View {
     var body: some View {
         Form {
             WorldSection(db: store.db)
+            UsageSection(db: store.db)
             ForEach(LLMTier.allCases, id: \.self) { tier in
                 TierSection(store: store, tier: tier)
             }
@@ -18,6 +19,65 @@ struct SettingsView: View {
             }
         }
         .navigationTitle("设置")
+    }
+}
+
+/// 用量仪表盘：按模型层统计今天与累计的 token
+private struct UsageSection: View {
+    let db: DatabaseQueue
+
+    @State private var todayByTier: [String: Int] = [:]
+    @State private var totalByTier: [String: Int] = [:]
+
+    var body: some View {
+        Section {
+            Text("今天合计：\(formatted(todayByTier.values.reduce(0, +))) tokens")
+                .font(.subheadline)
+            ForEach(LLMTier.allCases, id: \.self) { tier in
+                HStack {
+                    Text(tier.displayName)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Text("\(formatted(todayByTier[tier.rawValue] ?? 0)) 今日")
+                    Text("/")
+                        .foregroundStyle(.secondary)
+                    Text("\(formatted(totalByTier[tier.rawValue] ?? 0)) 累计")
+                }
+                .font(.subheadline.monospacedDigit())
+            }
+            Button("清空记录") {
+                try? db.write { db in try UsageRecord.deleteAll(db) }
+                load()
+            }
+            .foregroundStyle(.red)
+        } header: {
+            Text("用量")
+        } footer: {
+            Text("BYOK 下费用由你的模型账号承担，这里只记录各层模型的 token 消耗。")
+        }
+        .onAppear { load() }
+    }
+
+    private func formatted(_ value: Int) -> String {
+        value.formatted(.number)
+    }
+
+    private func load() {
+        let now = Date()
+        let startOfToday = Calendar.current.startOfDay(for: now)
+        let sums = try? db.read { db in
+            (
+                today: try UsageRecord
+                    .filter(Column("createdAt") >= startOfToday)
+                    .fetchAll(db),
+                all: try UsageRecord.fetchAll(db)
+            )
+        }
+        guard let sums else { return }
+        todayByTier = Dictionary(grouping: sums.today, by: \.tier)
+            .mapValues { $0.reduce(0) { $0 + $1.promptTokens + $1.completionTokens } }
+        totalByTier = Dictionary(grouping: sums.all, by: \.tier)
+            .mapValues { $0.reduce(0) { $0 + $1.promptTokens + $1.completionTokens } }
     }
 }
 

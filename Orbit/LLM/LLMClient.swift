@@ -38,6 +38,8 @@ struct JSONSchemaObject: @unchecked Sendable {
 struct LLMClient: Sendable {
     let config: LLMEndpointConfig
     let apiKey: String
+    /// 每次调用完成后回报 token 用量（由配置层注入，落库统计）
+    var usageHandler: (@Sendable (LLMUsage) -> Void)?
 
     private var chatCompletionsURL: URL? {
         let base = config.baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
@@ -71,6 +73,7 @@ struct LLMClient: Sendable {
                         "messages": messages.map { ["role": $0.role.rawValue, "content": $0.content] },
                         "temperature": temperature,
                         "stream": true,
+                        "stream_options": ["include_usage": true],
                     ])
 
                     let (bytes, response) = try await URLSession.shared.bytes(for: request)
@@ -80,18 +83,25 @@ struct LLMClient: Sendable {
                         throw LLMError.httpError(status: http.statusCode, body: body)
                     }
 
+                    var lastUsage: LLMUsage?
                     for try await line in bytes.lines {
                         try Task.checkCancellation()
                         guard line.hasPrefix("data: ") else { continue }
                         let payload = String(line.dropFirst(6))
                         if payload == "[DONE]" { break }
                         guard let data = payload.data(using: .utf8),
-                              let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-                              let choices = json["choices"] as? [[String: Any]],
+                              let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
+                        // 开启 include_usage 后，末块带 usage 且 choices 为空
+                        if let usage = Self.parseUsage(json) {
+                            lastUsage = usage
+                            continue
+                        }
+                        guard let choices = json["choices"] as? [[String: Any]],
                               let delta = choices.first?["delta"] as? [String: Any],
                               let content = delta["content"] as? String else { continue }
                         continuation.yield(content)
                     }
+                    if let lastUsage { usageHandler?(lastUsage) }
                     continuation.finish()
                 } catch is CancellationError {
                     continuation.finish()
@@ -142,10 +152,20 @@ struct LLMClient: Sendable {
               let content = message["content"] as? String else {
             throw LLMError.emptyContent
         }
+        if let usage = Self.parseUsage(json) { usageHandler?(usage) }
         do {
             return try JSONDecoder().decode(T.self, from: Data(content.utf8))
         } catch {
             throw LLMError.decodingFailed("\(error); 原始内容: \(content)")
         }
+    }
+
+    // MARK: - usage 解析
+
+    private static func parseUsage(_ json: [String: Any]) -> LLMUsage? {
+        guard let usage = json["usage"] as? [String: Any],
+              let prompt = usage["prompt_tokens"] as? Int,
+              let completion = usage["completion_tokens"] as? Int else { return nil }
+        return LLMUsage(promptTokens: prompt, completionTokens: completion)
     }
 }

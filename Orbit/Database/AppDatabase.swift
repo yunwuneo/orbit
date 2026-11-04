@@ -151,6 +151,18 @@ extension AppDatabase {
             }
         }
 
+        migrator.registerMigration("v2_usageRecords") { db in
+            // 用量记录（仪表盘只读统计，可整体清空）
+            try db.create(table: UsageRecord.databaseTableName) { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.column("tier", .text).notNull()
+                t.column("model", .text).notNull().defaults(to: "")
+                t.column("promptTokens", .integer).notNull().defaults(to: 0)
+                t.column("completionTokens", .integer).notNull().defaults(to: 0)
+                t.column("createdAt", .datetime).notNull().indexed()
+            }
+        }
+
         return migrator
     }
 }
