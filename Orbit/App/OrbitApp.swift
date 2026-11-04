@@ -3,10 +3,13 @@ import SwiftUI
 @main
 struct OrbitApp: App {
     let database: AppDatabase
+    let llmStore: LLMConfigurationStore
 
     init() {
         do {
-            database = try AppDatabase()
+            let db = try AppDatabase()
+            database = db
+            llmStore = LLMConfigurationStore(db: db.db)
         } catch {
             fatalError("数据库初始化失败: \(error)")
         }
@@ -14,7 +17,7 @@ struct OrbitApp: App {
 
     var body: some Scene {
         WindowGroup {
-            RootView()
+            RootView(database: database, llmStore: llmStore)
         }
     }
 }
