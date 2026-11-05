@@ -136,7 +136,16 @@ struct LLMClient: Sendable {
             messages: repairMessages, name: name, schema: schema, temperature: temperature)
         if let value = Self.decode(retryContent, as: type) { return value }
 
-        throw LLMError.decodingFailed("原始内容: \(retryContent)")
+        // 最后兜底：换全新上下文，让模型专门做"修复损坏 JSON"这一件事
+        let repaired = try await requestStructured(
+            messages: [
+                .system("你是 JSON 修复工具。用户会给你一段损坏的 JSON，请修复为合法 JSON：保持原意，只输出修复后的 JSON，不要任何解释。"),
+                .user(retryContent),
+            ],
+            name: name, schema: schema, temperature: 0.1)
+        if let value = Self.decode(repaired, as: type) { return value }
+
+        throw LLMError.decodingFailed("原始内容: \(repaired)")
     }
 
     /// 直接解码；失败则尝试从文本中提取 JSON 片段（去代码围栏、截取首个 { 到末个 }）再解码
@@ -173,9 +182,19 @@ struct LLMClient: Sendable {
         request.httpMethod = "POST"
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+
+        // 不少兼容端点会忽略 response_format，把 schema 同时写进提示词作为双保险
+        var wireMessages = messages
+        if let schemaData = try? JSONSerialization.data(withJSONObject: schema.object),
+           let schemaText = String(data: schemaData, encoding: .utf8) {
+            wireMessages.insert(
+                .system("你必须只输出一个符合以下 JSON Schema 的 JSON 对象，不要输出任何其他内容：\(schemaText)"),
+                at: 0)
+        }
+
         request.httpBody = try JSONSerialization.data(withJSONObject: [
             "model": config.model,
-            "messages": messages.map { ["role": $0.role.rawValue, "content": $0.content] },
+            "messages": wireMessages.map { ["role": $0.role.rawValue, "content": $0.content] },
             "temperature": temperature,
             "response_format": [
                 "type": "json_schema",
