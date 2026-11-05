@@ -4,11 +4,14 @@ import GRDB
 /// BYOK 设置页：双层端点配置。Key 只进 Keychain，不落数据库。
 struct SettingsView: View {
     let store: LLMConfigurationStore
+    var onChatWiped: () -> Void = {}
+    var onFullReset: () -> Void = {}
 
     var body: some View {
         Form {
             WorldSection(db: store.db)
             UsageSection(db: store.db)
+            DataSection(db: store.db, onChatWiped: onChatWiped, onFullReset: onFullReset)
             ForEach(LLMTier.allCases, id: \.self) { tier in
                 TierSection(store: store, tier: tier)
             }
@@ -19,6 +22,72 @@ struct SettingsView: View {
             }
         }
         .navigationTitle("设置")
+    }
+}
+
+/// 数据管理：分级清空，全部重置仅保留模型配置
+private struct DataSection: View {
+    let db: DatabaseQueue
+    var onChatWiped: () -> Void
+    var onFullReset: () -> Void
+
+    @State private var pendingAction: WipeAction?
+
+    private enum WipeAction: String, Identifiable {
+        case chat, world, all
+
+        var id: String { rawValue }
+
+        var message: String {
+            switch self {
+            case .chat: "删除与主角的全部对话记录。人设档案与世界不受影响。"
+            case .world: "删除全部世界事件与未结线索，主角动态状态重置。人设档案与 NPC 保留。"
+            case .all: "删除人设、NPC、聊天记录、世界事件与用量记录，回到初始状态重新共建。模型配置保留。"
+            }
+        }
+
+        var buttonTitle: String {
+            switch self {
+            case .chat: "清空聊天记录"
+            case .world: "清空世界数据"
+            case .all: "全部重置"
+            }
+        }
+    }
+
+    var body: some View {
+        Section {
+            Button("清空聊天记录…") { pendingAction = .chat }
+            Button("清空世界数据…") { pendingAction = .world }
+            Button("删除人设，全部重置…") { pendingAction = .all }
+                .foregroundStyle(.red)
+        } header: {
+            Text("数据")
+        } footer: {
+            Text("全部重置后回到向导重新共建；模型端点与 API Key 保留。")
+        }
+        .confirmationDialog(
+            "此操作不可撤销",
+            item: $pendingAction,
+            titleVisibility: .visible
+        ) { action in
+            Button(action.buttonTitle, role: .destructive) { perform(action) }
+        } message: { action in
+            Text(action.message)
+        }
+    }
+
+    private func perform(_ action: WipeAction) {
+        switch action {
+        case .chat:
+            try? db.wipeChatHistory()
+            onChatWiped()
+        case .world:
+            try? db.wipeWorldData()
+        case .all:
+            try? db.wipeAllUserData()
+            onFullReset()
+        }
     }
 }
 

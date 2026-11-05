@@ -10,6 +10,7 @@ struct RootView: View {
     @State private var showSettings = false
     @State private var protagonist: Protagonist?
     @State private var modelReady = false
+    @State private var chatRevision = 0
 
     init(database: AppDatabase, llmStore: LLMConfigurationStore) {
         self.database = database
@@ -25,6 +26,7 @@ struct RootView: View {
                         engine: ChatEngine(db: database.db, llmStore: llmStore),
                         worldEngine: worldEngine,
                         protagonistName: protagonist.name)
+                        .id(chatRevision)
                 } else if !modelReady {
                     ModelSetupView(store: llmStore) {
                         modelReady = true
@@ -45,7 +47,13 @@ struct RootView: View {
             }
             .sheet(isPresented: $showSettings) {
                 NavigationStack {
-                    SettingsView(store: llmStore)
+                    SettingsView(
+                        store: llmStore,
+                        onChatWiped: { chatRevision += 1 },
+                        onFullReset: {
+                            showSettings = false
+                            loadProtagonist()
+                        })
                         .toolbar {
                             ToolbarItem(placement: .topBarLeading) {
                                 Button("完成") { showSettings = false }

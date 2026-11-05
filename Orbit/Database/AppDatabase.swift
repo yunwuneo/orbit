@@ -166,3 +166,46 @@ extension AppDatabase {
         return migrator
     }
 }
+
+// MARK: - 数据管理（设置页的清空入口）
+
+extension DatabaseQueue {
+    /// 只清聊天记录，人设与世界不受影响
+    func wipeChatHistory() throws {
+        try write { db in
+            try ChatMessage.deleteAll(db)
+        }
+    }
+
+    /// 清世界运转产生的数据（事件/未结线索/主角动态状态），保留人设档案与 NPC
+    @MainActor
+    func wipeWorldData() throws {
+        try write { db in
+            try WorldEvent.deleteAll(db)
+            try OpenLoop.deleteAll(db)
+            try ProtagonistState.deleteAll(db)
+            // 世界时钟重新锚定到当下，避免清空后立即补演一大段
+            var tick = Setting(
+                key: WorldEngine.lastTickKey,
+                value: ISO8601DateFormatter().string(from: Date()))
+            try tick.save(db)
+        }
+    }
+
+    /// 全部重置：回到刚装好 App 的状态，仅保留 LLM 端点配置与钥匙串里的 Key
+    func wipeAllUserData() throws {
+        try write { db in
+            try ChatMessage.deleteAll(db)
+            try WorldEvent.deleteAll(db)
+            try OpenLoop.deleteAll(db)
+            try ProtagonistState.deleteAll(db)
+            try Relation.deleteAll(db)
+            try NPC.deleteAll(db)
+            try UserFact.deleteAll(db)
+            try UserModel.deleteAll(db)
+            try Protagonist.deleteAll(db)
+            try UsageRecord.deleteAll(db)
+            try Setting.filter(!Column("key").like("llm.%")).deleteAll(db)
+        }
+    }
+}
