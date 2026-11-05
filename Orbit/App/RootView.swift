@@ -8,6 +8,7 @@ struct RootView: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var worldEngine: WorldEngine
     @State private var showSettings = false
+    @State private var showWorld = false
     @State private var protagonist: Protagonist?
     @State private var modelReady = false
     @State private var chatRevision = 0
@@ -39,11 +40,21 @@ struct RootView: View {
             }
             .navigationTitle(protagonist?.name ?? "Orbit")
             .toolbar {
+                if protagonist != nil {
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button { showWorld = true } label: {
+                            Image(systemName: "globe")
+                        }
+                    }
+                }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button { showSettings = true } label: {
                         Image(systemName: "gearshape")
                     }
                 }
+            }
+            .navigationDestination(isPresented: $showWorld) {
+                WorldPanelView(db: database.db)
             }
             .sheet(isPresented: $showSettings) {
                 NavigationStack {
