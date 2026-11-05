@@ -8,6 +8,10 @@ struct ChatView: View {
     @State private var input = ""
     @FocusState private var inputFocused: Bool
 
+    private var canSend: Bool {
+        !input.trimmingCharacters(in: .whitespaces).isEmpty && !engine.isReplying
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             if worldEngine.isTicking {
@@ -18,9 +22,10 @@ struct ChatView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 5)
-                .background(.bar)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .glassEffect(.regular, in: .capsule)
+                .padding(.top, 4)
             }
 
             ScrollViewReader { proxy in
@@ -29,6 +34,7 @@ struct ChatView: View {
                         ForEach(engine.messages) { message in
                             MessageBubble(message: message)
                                 .id(message.id)
+                                .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .bottom)))
                         }
                         if engine.isReplying {
                             MessageBubble(
@@ -40,6 +46,7 @@ struct ChatView: View {
                         }
                     }
                     .padding()
+                    .animation(.spring(duration: 0.25), value: engine.messages.count)
                 }
                 .onChange(of: engine.messages.count) { scrollToBottom(proxy) }
                 .onChange(of: engine.streamingText) { scrollToBottom(proxy) }
@@ -53,28 +60,30 @@ struct ChatView: View {
                     .padding(.top, 4)
             }
 
-            HStack(spacing: 10) {
-                TextField("发消息…", text: $input, axis: .vertical)
-                    .lineLimit(1...4)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 9)
-                    .background(Color(.secondarySystemBackground), in: .capsule)
-                    .focused($inputFocused)
-                Button {
-                    let text = input
-                    input = ""
-                    Task { await engine.send(text) }
-                } label: {
-                    Image(systemName: "arrow.up.circle.fill")
-                        .font(.system(size: 32))
-                        .foregroundStyle(input.trimmingCharacters(in: .whitespaces).isEmpty || engine.isReplying
-                                         ? Color.secondary : Color.accentColor)
+            GlassEffectContainer(spacing: 10) {
+                HStack(spacing: 10) {
+                    TextField("发消息…", text: $input, axis: .vertical)
+                        .lineLimit(1...4)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 9)
+                        .glassEffect(.regular, in: .capsule)
+                        .focused($inputFocused)
+                    Button {
+                        let text = input
+                        input = ""
+                        Task { await engine.send(text) }
+                    } label: {
+                        Image(systemName: "arrow.up")
+                            .font(.body.weight(.semibold))
+                    }
+                    .buttonStyle(.glassProminent)
+                    .disabled(!canSend)
                 }
-                .disabled(input.trimmingCharacters(in: .whitespaces).isEmpty || engine.isReplying)
             }
             .padding(.horizontal)
             .padding(.vertical, 8)
         }
+        .background(chatBackground)
         .navigationTitle(protagonistName)
         .navigationBarTitleDisplayMode(.inline)
         .onAppear { engine.loadHistory() }
@@ -82,6 +91,19 @@ struct ChatView: View {
         .onReceive(Timer.publish(every: 60, on: .main, in: .common).autoconnect()) { _ in
             engine.loadHistory()
         }
+    }
+
+    /// 淡淡的渐变底，让玻璃气泡有内容可折射
+    private var chatBackground: some View {
+        LinearGradient(
+            colors: [
+                Color.accentColor.opacity(0.10),
+                Color(.systemBackground),
+                Color.purple.opacity(0.08),
+            ],
+            startPoint: .top,
+            endPoint: .bottom)
+            .ignoresSafeArea()
     }
 
     private func scrollToBottom(_ proxy: ScrollViewProxy) {
@@ -107,8 +129,10 @@ private struct MessageBubble: View {
                 .font(.body)
                 .padding(.horizontal, 13)
                 .padding(.vertical, 9)
-                .background(
-                    isUser ? Color.accentColor.opacity(0.85) : Color(.secondarySystemBackground),
+                .glassEffect(
+                    isUser
+                        ? .regular.tint(Color.accentColor).interactive()
+                        : .regular.interactive(),
                     in: .rect(cornerRadius: 18))
                 .foregroundStyle(isUser ? .white : .primary)
                 .textSelection(.enabled)
