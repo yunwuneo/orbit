@@ -134,9 +134,10 @@ private struct WorldSection: View {
     }
 }
 
-private struct TierSection: View {
+struct TierSection: View {
     let store: LLMConfigurationStore
     let tier: LLMTier
+    var onSaved: (() -> Void)? = nil
 
     @State private var baseURL = ""
     @State private var model = ""
@@ -197,6 +198,7 @@ private struct TierSection: View {
         try? store.saveEndpoint(config, for: tier)
         try? store.saveAPIKey(apiKey.trimmingCharacters(in: .whitespaces), for: tier)
         saved = true
+        onSaved?()
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { saved = false }
     }
 }

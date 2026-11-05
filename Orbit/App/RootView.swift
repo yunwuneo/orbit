@@ -9,6 +9,7 @@ struct RootView: View {
     @State private var worldEngine: WorldEngine
     @State private var showSettings = false
     @State private var protagonist: Protagonist?
+    @State private var modelReady = false
 
     init(database: AppDatabase, llmStore: LLMConfigurationStore) {
         self.database = database
@@ -24,6 +25,10 @@ struct RootView: View {
                         engine: ChatEngine(db: database.db, llmStore: llmStore),
                         worldEngine: worldEngine,
                         protagonistName: protagonist.name)
+                } else if !modelReady {
+                    ModelSetupView(store: llmStore) {
+                        modelReady = true
+                    }
                 } else {
                     WizardView(state: WizardState(db: database.db, llmStore: llmStore)) {
                         loadProtagonist()
@@ -70,6 +75,7 @@ struct RootView: View {
     }
 
     private func loadProtagonist() {
+        modelReady = llmStore.isReady(.main)
         protagonist = try? database.db.read { db in
             try Protagonist.fetchOne(db, key: Protagonist.singletonID)
         }
