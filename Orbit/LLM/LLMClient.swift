@@ -122,6 +122,52 @@ struct LLMClient: Sendable {
         as type: T.Type,
         temperature: Double = 0.7
     ) async throws -> T {
+        let content = try await requestStructured(
+            messages: messages, name: name, schema: schema, temperature: temperature)
+        if let value = Self.decode(content, as: type) { return value }
+
+        // 端点可能忽略了 json_schema 约束（返回了 markdown 或散文）。
+        // 重试一次：把错误输出贴回去，明确要求只输出纯 JSON。
+        let repairMessages = messages + [
+            .assistant(content),
+            .user("你的输出不符合格式要求。请重新输出：只输出符合 JSON Schema 的纯 JSON，不要包含任何解释、markdown 代码块或多余文字。"),
+        ]
+        let retryContent = try await requestStructured(
+            messages: repairMessages, name: name, schema: schema, temperature: temperature)
+        if let value = Self.decode(retryContent, as: type) { return value }
+
+        throw LLMError.decodingFailed("原始内容: \(retryContent)")
+    }
+
+    /// 直接解码；失败则尝试从文本中提取 JSON 片段（去代码围栏、截取首个 { 到末个 }）再解码
+    private static func decode<T: Decodable>(_ content: String, as type: T.Type) -> T? {
+        if let value = try? JSONDecoder().decode(T.self, from: Data(content.utf8)) {
+            return value
+        }
+        guard let extracted = extractJSON(from: content) else { return nil }
+        return try? JSONDecoder().decode(T.self, from: Data(extracted.utf8))
+    }
+
+    private static func extractJSON(from text: String) -> String? {
+        var trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.hasPrefix("```") {
+            trimmed = trimmed
+                .replacingOccurrences(of: "```json", with: "")
+                .replacingOccurrences(of: "```", with: "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        guard let start = trimmed.firstIndex(of: "{"),
+              let end = trimmed.lastIndex(of: "}"),
+              start <= end else { return nil }
+        return String(trimmed[start...end])
+    }
+
+    private func requestStructured(
+        messages: [LLMMessage],
+        name: String,
+        schema: JSONSchemaObject,
+        temperature: Double
+    ) async throws -> String {
         guard let url = chatCompletionsURL else { throw LLMError.invalidEndpoint }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
@@ -153,11 +199,7 @@ struct LLMClient: Sendable {
             throw LLMError.emptyContent
         }
         if let usage = Self.parseUsage(json) { usageHandler?(usage) }
-        do {
-            return try JSONDecoder().decode(T.self, from: Data(content.utf8))
-        } catch {
-            throw LLMError.decodingFailed("\(error); 原始内容: \(content)")
-        }
+        return content
     }
 
     // MARK: - usage 解析
